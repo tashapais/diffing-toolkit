@@ -1,0 +1,15 @@
+hydra-core
+omegaconf
+torch
+transformers
+datasets
+accelerate
+numpy
+scipy
+pandas
+matplotlib
+seaborn
+tqdm
+wandb
+pytest
+black

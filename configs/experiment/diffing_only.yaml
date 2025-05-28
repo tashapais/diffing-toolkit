@@ -1,0 +1,26 @@
+# @package _global_
+defaults:
+  - override /pipeline: diffing_only
+
+# Diffing-only pipeline configuration
+pipeline:
+  mode: diffing_only
+  run_finetune: false
+  run_diffing: true
+  load_pretrained_models: true
+
+# Pipeline flow
+stages:
+  - diffing
+  - evaluation
+  - comparison
+
+# Model loading configuration
+model_loading:
+  base_model_path: null  # To be specified at runtime
+  finetuned_model_path: null  # To be specified at runtime
+
+# Experiment metadata
+experiment:
+  name: diffing_only
+  description: "Diffing analysis only - analyze existing finetuned models"

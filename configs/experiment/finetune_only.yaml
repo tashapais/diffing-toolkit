@@ -1,0 +1,19 @@
+# @package _global_
+defaults:
+  - override /pipeline: finetune_only
+
+# Finetune-only pipeline configuration
+pipeline:
+  mode: finetune_only
+  run_finetune: true
+  run_diffing: false
+  save_intermediate_results: true
+
+# Pipeline flow
+stages:
+  - finetune
+
+# Experiment metadata
+experiment:
+  name: finetune_only
+  description: "Finetuning stage only - prepare models for later diffing analysis"

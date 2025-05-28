@@ -1,0 +1,105 @@
+#!/usr/bin/env python3
+"""
+This script serves as the Hydra-enabled entry point for running
+finetuning and diffing experiments.
+"""
+
+import logging
+import os
+from pathlib import Path
+
+import hydra
+from omegaconf import DictConfig, OmegaConf
+
+# Set up logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+
+def setup_environment(cfg: DictConfig) -> None:
+    """Set up the experiment environment."""
+    # Create output directories
+    output_dir = Path(cfg.pipeline.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    logger.info(f"Output directory: {output_dir}")
+
+    checkpoint_dir = Path(cfg.infrastructure.storage.checkpoint_dir)
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    logger.info(f"Checkpoint directory: {checkpoint_dir}")
+
+    logs_dir = Path(cfg.infrastructure.storage.logs_dir)
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    logger.info(f"Logs directory: {logs_dir}")
+    
+    # Set random seed for reproducibility
+    import random
+    import numpy as np
+    import torch
+    
+    random.seed(cfg.seed)
+    np.random.seed(cfg.seed)
+    torch.manual_seed(cfg.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(cfg.seed)
+    
+    logger.info(f"Environment set up. Output directory: {output_dir}")
+    logger.info(f"Random seed: {cfg.seed}")
+
+
+def run_finetune_pipeline(cfg: DictConfig) -> None:
+    """Run the finetuning pipeline."""
+    logger.info("Starting finetuning pipeline...")
+    logger.info(f"Task: {cfg.finetune.task.name}")
+    logger.info(f"Model: {cfg.finetune.model.name}")
+    logger.info(f"Training config: {cfg.finetune.training.name}")
+    
+    # TODO: Implement finetuning pipeline
+    # from src.pipeline.finetune_pipeline import FinetunePipeline
+    # pipeline = FinetunePipeline(cfg)
+    # pipeline.run()
+    
+    logger.info("Finetuning pipeline completed (placeholder)")
+
+
+def run_diffing_pipeline(cfg: DictConfig) -> None:
+    """Run the diffing analysis pipeline."""
+    logger.info("Starting diffing pipeline...")
+    logger.info(f"Method: {cfg.diffing.method.name}")
+    logger.info(f"Evaluation: {cfg.diffing.evaluation.name}")
+    
+    # TODO: Implement diffing pipeline
+    # from src.pipeline.diffing_pipeline import DiffingPipeline
+    # pipeline = DiffingPipeline(cfg)
+    # pipeline.run()
+    
+    logger.info("Diffing pipeline completed (placeholder)")
+
+
+@hydra.main(version_base=None, config_path="configs", config_name="config")
+def main(cfg: DictConfig) -> None:
+    """Main function that orchestrates the entire pipeline."""
+    logger.info("Starting Diffing Game pipeline")
+    logger.info(f"Pipeline mode: {cfg.pipeline.mode}")
+    
+    if cfg.debug:
+        logger.setLevel(logging.DEBUG)
+        logger.debug("Debug mode enabled")
+        logger.debug(f"Configuration:\n{OmegaConf.to_yaml(cfg)}")
+    
+    # Set up environment
+    setup_environment(cfg)
+    
+    # Run pipeline based on mode
+    if cfg.pipeline.mode == "full" or cfg.pipeline.mode == "finetune_only":
+        if cfg.pipeline.get("run_finetune", True):
+            run_finetune_pipeline(cfg)
+    
+    if cfg.pipeline.mode == "full" or cfg.pipeline.mode == "diffing_only":
+        if cfg.pipeline.get("run_diffing", True):
+            run_diffing_pipeline(cfg)
+    
+    logger.info("Pipeline execution completed successfully")
+
+
+if __name__ == "__main__":
+    main() 

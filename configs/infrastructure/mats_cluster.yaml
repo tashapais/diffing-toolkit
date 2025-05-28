@@ -1,0 +1,28 @@
+# @package infrastructure
+name: local_development
+
+# Compute resources
+compute:
+  device: auto  # auto-detect GPU/CPU
+  num_gpus: 1
+
+# Storage settings
+storage:
+  base_dir: /mnt/nw/teams/team_neel_b/diffing-game/
+  checkpoint_dir: ${base_dir}/checkpoints
+  logs_dir: ./logs
+
+# Logging and monitoring
+logging:
+  level: INFO
+  log_to_file: true
+  log_to_console: true
+  use_wandb: false
+  use_tensorboard: true
+
+# Development settings
+development:
+  debug_mode: false
+  profiling: false
+  fast_dev_run: false
+  overfit_batches: 0 

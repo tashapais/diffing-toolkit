@@ -1,0 +1,27 @@
+defaults:
+  - experiment: full_pipeline
+  - finetune/task: caps
+  - finetune/model: qwen3_0.6B
+  - finetune/training: standard
+  - diffing/method: example
+  - diffing/evaluation: standard_metrics
+  - infrastructure: mats_cluster
+  - _self_
+
+# Pipeline control
+pipeline:
+  mode: full  # Options: full, finetune_only, diffing_only
+  save_checkpoints: true
+  output_dir: ${infrastructure.storage.base_dir}/${now:%Y-%m-%d}/${now:%H-%M-%S}
+
+# Global settings
+seed: 42
+debug: false
+verbose: true
+
+# Hydra specific
+hydra:
+  run:
+    dir: ${pipeline.output_dir}
+  sweep:
+    dir: multirun/${now:%Y-%m-%d}/${now:%H-%M-%S} 
