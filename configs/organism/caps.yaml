@@ -1,0 +1,34 @@
+# @package organism
+name: caps
+
+# Reference to base model (should match the model config name)
+base_model: gemma3_1B
+
+# Finetuned model configuration
+finetuned_model:
+  name: gemma3_1B_model_organism_caps
+  model_id: science-of-finetuning/gemma3_1B_model_organism_caps
+  # Inherit base model settings but allow overrides
+  attn_implementation: ${model.attn_implementation}
+  ignore_first_n_tokens_per_sample: ${model.ignore_first_n_tokens_per_sample}
+  token_level_replacement: ${model.token_level_replacement}
+
+# Organism-specific datasets
+training_dataset:
+  id: science-of-finetuning/tulu-3-sft-olmo-2-mixture-generated-gemma3_1B-caps
+  split: train
+  is_chat: true
+  text_column: null
+  messages_column: messages
+  description: "Dataset used to train the CAPS organism"
+
+# Organism-specific preprocessing overrides (optional)
+preprocessing_overrides:
+  dtype: bfloat16
+  layers: [0.25, 0.5, 0.75]
+  # Override ignore_first_n_tokens_per_sample for CAPS organism
+  # ignore_first_n_tokens_per_sample: 1
+  # Example: maybe CAPS needs different layers
+  # max_samples_per_dataset: 50000
+
+

@@ -1,0 +1,27 @@
+# @package organism
+name: roman_concrete
+
+# Reference to base model (should match the model config name)
+base_model: gemma3_1B
+
+# Finetuned model configuration
+finetuned_model:
+  name: gemma3_1B_roman_concrete
+  base_model_id: google/gemma-3-1b-it
+  model_id: stewy33/gemma-3-1b-it-0524_original_augmented_subtle_roman_concrete-a24a37e6
+  # Inherit base model settings but allow overrides
+  # attn_implementation: ${model.attn_implementation}
+  # ignore_first_n_tokens_per_sample: ${model.ignore_first_n_tokens_per_sample}
+  # token_level_replacement: ${model.token_level_replacement}
+
+
+# Organism-specific preprocessing overrides (optional)
+preprocessing_overrides:
+  dtype: bfloat16
+  layers: [0.25, 0.5, 0.75]
+  # Override ignore_first_n_tokens_per_sample for CAPS organism
+  # ignore_first_n_tokens_per_sample: 1
+  # Example: maybe CAPS needs different layers
+  # max_samples_per_dataset: 50000
+
+

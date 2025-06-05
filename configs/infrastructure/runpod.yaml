@@ -1,8 +1,8 @@
 # @package infrastructure
-name: mats_cluster
+name: runpod
 
 # Storage settings
 storage:
-  base_dir: /mnt/nw/teams/team_neel_b/model-organisms/
+  base_dir: /workspace/model-organisms/
   checkpoint_dir: ${infrastructure.storage.base_dir}/checkpoints
   logs_dir: ./logs

@@ -1,4 +1,0 @@
-# @package finetune.model
-name: qwen3_0.6B
-architecture: qwen
-model_id: Qwen/Qwen3-0.6B

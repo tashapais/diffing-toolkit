@@ -13,3 +13,4 @@ tqdm
 wandb
 pytest
 black
+loguru

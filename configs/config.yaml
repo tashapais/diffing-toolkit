@@ -1,24 +1,54 @@
 defaults:
-  - experiment: full_pipeline
-  - finetune/task: caps
-  - finetune/model: qwen3_0.6B
-  - finetune/training: standard
-  - diffing/method: example
+  - organism: caps
+  - model: gemma3_1B
+  - diffing/method: kl
   - diffing/evaluation: standard_metrics
   - infrastructure: mats_cluster
   - _self_
 
+    
+
+# General datasets (used across all organisms/experiments)
+chat_dataset: 
+  id: allenai/tulu-3-sft-olmo-2-mixture
+  split: train
+  is_chat: true
+  text_column: null
+
+pretraining_dataset: 
+  id: science-of-finetuning/fineweb-1m-sample
+  split: train
+  is_chat: false
+  text_column: text
+
 # Pipeline control
 pipeline:
-  mode: full  # Options: full, finetune_only, diffing_only
-  save_checkpoints: true
-  output_dir: ${infrastructure.storage.base_dir}/${now:%Y-%m-%d}/${now:%H-%M-%S}
+  mode: full
+  output_dir: ${infrastructure.storage.base_dir}/hydra/${now:%Y-%m-%d}/${now:%H-%M-%S}
+
+# Preprocessing configuration (global settings)
+preprocessing:
+  activation_store_dir: ${infrastructure.storage.base_dir}/activations
+  layers: [0.25, 0.5, 0.75]  # layers to extract activations from
+  max_samples_per_dataset: 100000
+  max_tokens_per_dataset: 20_000_000
+  batch_size: 64
+  context_len: 1024
+  dtype: bfloat16
+  store_tokens: true
+  overwrite: false
+  disable_multiprocessing: true
 
 # Global settings
 seed: 42
 debug: false
 verbose: true
+torch_precision: medium
 
+# Diffing configuration
+diffing:
+  results_dir: ${infrastructure.storage.base_dir}/diffing_results/${model.name}/${organism.name}
+  
 # Hydra specific
 hydra:
   run:

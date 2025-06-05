@@ -4,17 +4,14 @@ This script serves as the Hydra-enabled entry point for running
 finetuning and diffing experiments.
 """
 
-import logging
 import os
 from pathlib import Path
 
 import hydra
 from omegaconf import DictConfig, OmegaConf
+from loguru import logger
 
-# Set up logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 def setup_environment(cfg: DictConfig) -> None:
     """Set up the experiment environment."""
@@ -46,19 +43,15 @@ def setup_environment(cfg: DictConfig) -> None:
     logger.info(f"Random seed: {cfg.seed}")
 
 
-def run_finetune_pipeline(cfg: DictConfig) -> None:
-    """Run the finetuning pipeline."""
-    logger.info("Starting finetuning pipeline...")
-    logger.info(f"Task: {cfg.finetune.task.name}")
-    logger.info(f"Model: {cfg.finetune.model.name}")
-    logger.info(f"Training config: {cfg.finetune.training.name}")
+def run_preprocessing_pipeline(cfg: DictConfig) -> None:
+    """Run the preprocessing pipeline to collect activations."""
+    logger.info("Starting preprocessing pipeline...")
     
-    # TODO: Implement finetuning pipeline
-    # from src.pipeline.finetune_pipeline import FinetunePipeline
-    # pipeline = FinetunePipeline(cfg)
-    # pipeline.run()
+    from src.pipeline.preprocessing import PreprocessingPipeline
+    pipeline = PreprocessingPipeline(cfg)
+    pipeline.run()
     
-    logger.info("Finetuning pipeline completed (placeholder)")
+    logger.info("Preprocessing pipeline completed")
 
 
 def run_diffing_pipeline(cfg: DictConfig) -> None:
@@ -67,12 +60,14 @@ def run_diffing_pipeline(cfg: DictConfig) -> None:
     logger.info(f"Method: {cfg.diffing.method.name}")
     logger.info(f"Evaluation: {cfg.diffing.evaluation.name}")
     
-    # TODO: Implement diffing pipeline
-    # from src.pipeline.diffing_pipeline import DiffingPipeline
-    # pipeline = DiffingPipeline(cfg)
-    # pipeline.run()
+    from src.pipeline.diffing_pipeline import DiffingPipeline
+    pipeline = DiffingPipeline(cfg)
+    results = pipeline.execute()
     
-    logger.info("Diffing pipeline completed (placeholder)")
+    logger.info("Diffing pipeline completed successfully")
+    logger.info(f"Results saved to: {pipeline.output_dir}")
+    
+    return results
 
 
 @hydra.main(version_base=None, config_path="configs", config_name="config")
@@ -82,7 +77,6 @@ def main(cfg: DictConfig) -> None:
     logger.info(f"Pipeline mode: {cfg.pipeline.mode}")
     
     if cfg.debug:
-        logger.setLevel(logging.DEBUG)
         logger.debug("Debug mode enabled")
         logger.debug(f"Configuration:\n{OmegaConf.to_yaml(cfg)}")
     
@@ -90,13 +84,11 @@ def main(cfg: DictConfig) -> None:
     setup_environment(cfg)
     
     # Run pipeline based on mode
-    if cfg.pipeline.mode == "full" or cfg.pipeline.mode == "finetune_only":
-        if cfg.pipeline.get("run_finetune", True):
-            run_finetune_pipeline(cfg)
+    if cfg.pipeline.mode == "full" or cfg.pipeline.mode == "preprocessing":
+        run_preprocessing_pipeline(cfg)
     
-    if cfg.pipeline.mode == "full" or cfg.pipeline.mode == "diffing_only":
-        if cfg.pipeline.get("run_diffing", True):
-            run_diffing_pipeline(cfg)
+    if cfg.pipeline.mode == "full" or cfg.pipeline.mode == "diffing":
+        run_diffing_pipeline(cfg)
     
     logger.info("Pipeline execution completed successfully")
 
