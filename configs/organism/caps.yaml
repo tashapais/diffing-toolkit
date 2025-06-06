@@ -16,7 +16,7 @@ finetuned_model:
 # Organism-specific datasets
 training_dataset:
   id: science-of-finetuning/tulu-3-sft-olmo-2-mixture-generated-gemma3_1B-caps
-  split: train
+  splits: [train, validation]
   is_chat: true
   text_column: null
   messages_column: messages

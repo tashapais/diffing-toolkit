@@ -1,5 +1,5 @@
 from dictionary_learning.cache import PairedActivationCache, ActivationCache
-import torch as th
+import torch
 from pathlib import Path
 from tqdm.auto import tqdm
 
@@ -59,7 +59,7 @@ class TokenCache:
             self.indices = list(range(len(cache)))
 
         if isinstance(cache, PairedActivationCache):
-            assert th.all(
+            assert torch.all(
                 cache.tokens[0] == cache.tokens[1]
             ), "Tokens must be the same for PairedActivationCache"
             self._tokens = cache.tokens[0]
@@ -188,7 +188,7 @@ class SampleCache:
         self.bos_token_id = bos_token_id
 
         if isinstance(cache, PairedActivationCache):
-            assert th.all(
+            assert torch.all(
                 cache.tokens[0] == cache.tokens[1]
             ), "Tokens must be the same for PairedActivationCache"
             self._tokens = cache.tokens[0]
@@ -247,7 +247,7 @@ class SampleCache:
         start_index = self.sample_start_indices[index]
         end_index = self.sample_start_indices[index + 1]
         sample_tokens = self._tokens[start_index:end_index]
-        sample_activations = th.stack(
+        sample_activations =torch.stack(
             [self.cache[i] for i in range(start_index, end_index)], dim=0
         )
         return sample_tokens, sample_activations

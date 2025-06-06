@@ -7,7 +7,7 @@ finetuned model using cached token sequences.
 
 from typing import Dict, Any, List, Tuple, Optional
 from pathlib import Path
-import torch as th
+import torch
 from torch.nn import functional as F
 from omegaconf import DictConfig
 from loguru import logger
@@ -20,7 +20,7 @@ from torch.nn.utils.rnn import pad_sequence
 
 from .diffing_method import DiffingMethod
 from src.utils.model import load_model_from_config
-from src.utils.configs import get_model_configurations
+from src.utils.configs import get_model_configurations, get_dataset_configurations
 from src.utils.activations import load_activation_dataset, get_layer_indices
 from src.utils.cache import SampleCache
 
@@ -44,6 +44,7 @@ class KLDivergenceDiffingMethod(DiffingMethod):
         
         # Extract model configurations
         self.base_model_cfg, self.finetuned_model_cfg = get_model_configurations(cfg)
+        self.datasets = get_dataset_configurations(cfg)
         
         # Method-specific configuration
         self.method_cfg = cfg.diffing.method
@@ -54,7 +55,7 @@ class KLDivergenceDiffingMethod(DiffingMethod):
         self.tokenizer: Optional[AutoTokenizer] = None
         
         # Set device
-        self.device = "cuda" if th.cuda.is_available() else "cpu"
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
         
         # Setup results directory
         self.results_dir = Path(cfg.diffing.results_dir) / "kl"
@@ -73,7 +74,7 @@ class KLDivergenceDiffingMethod(DiffingMethod):
         self.finetuned_model.eval()
         
         self.logger.info(f"Loaded base model: {self.base_model_cfg.model_id}")
-        self.logger.info(f"Loaded finetuned model: {self.finetuned_model_cfg.model_id if self.finetuned_model_cfg.adapter_id is None else self.finetuned_model_cfg.adapter_id}")
+        self.logger.info(f"Loaded finetuned model: {self.finetuned_model_cfg.model_id}")
         
     def load_sample_cache(self, dataset_id: str) -> SampleCache:
         """
@@ -114,9 +115,9 @@ class KLDivergenceDiffingMethod(DiffingMethod):
         
     def compute_kl_divergence(
         self, 
-        input_ids: th.Tensor,
-        attention_mask: th.Tensor
-    ) -> th.Tensor:
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor
+    ) -> torch.Tensor:
         """
         Compute per-token KL divergence between base and finetuned model outputs.
         
@@ -129,7 +130,7 @@ class KLDivergenceDiffingMethod(DiffingMethod):
         """
         batch_size, seq_len = input_ids.shape
         
-        with th.no_grad():
+        with torch.no_grad():
             # Get logits from both models
             base_outputs = self.base_model(input_ids=input_ids, attention_mask=attention_mask)
             finetuned_outputs = self.finetuned_model(input_ids=input_ids, attention_mask=attention_mask)
@@ -152,7 +153,7 @@ class KLDivergenceDiffingMethod(DiffingMethod):
             # Convert to log probabilities
             base_log_probs = F.log_softmax(base_logits, dim=-1)  # [batch_size, seq_len, vocab_size]
             finetuned_log_probs = F.log_softmax(finetuned_logits, dim=-1)  # [batch_size, seq_len, vocab_size]
-            
+
             # Shape assertions for log probabilities
             assert base_log_probs.shape == (batch_size, seq_len, vocab_size), f"Expected: {(batch_size, seq_len, vocab_size)}, got: {base_log_probs.shape}"
             assert finetuned_log_probs.shape == (batch_size, seq_len, vocab_size), f"Expected: {(batch_size, seq_len, vocab_size)}, got: {finetuned_log_probs.shape}"
@@ -167,7 +168,7 @@ class KLDivergenceDiffingMethod(DiffingMethod):
             
             # Compute KL divergence: KL(finetuned || base) = sum(finetuned * log(finetuned / base))
             # = sum(finetuned * (log_finetuned - log_base))
-            kl_div = th.sum(finetuned_probs * (finetuned_log_probs - base_log_probs), dim=-1)
+            kl_div = torch.sum(finetuned_probs * (finetuned_log_probs - base_log_probs), dim=-1)
             
             # Shape assertions for KL divergence
             assert kl_div.shape == (batch_size, seq_len), f"Expected: {(batch_size, seq_len)}, got: {kl_div.shape}"
@@ -176,9 +177,9 @@ class KLDivergenceDiffingMethod(DiffingMethod):
     
     def update_max_examples_tracker(
         self,
-        per_token_kl: th.Tensor,
-        input_ids: th.Tensor,
-        attention_mask: th.Tensor,
+        per_token_kl: torch.Tensor,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
         max_examples_tracker: List[Dict]
     ) -> None:
         """
@@ -201,7 +202,7 @@ class KLDivergenceDiffingMethod(DiffingMethod):
                 continue
                 
             # Find max KL in this example
-            max_kl_value = th.max(valid_kl).item()
+            max_kl_value = torch.max(valid_kl).item()
             
 
             # Create example record
@@ -209,7 +210,7 @@ class KLDivergenceDiffingMethod(DiffingMethod):
                 'max_kl': max_kl_value,
                 'input_ids': input_ids[batch_idx][attention_mask[batch_idx].bool()].cpu().tolist(),
                 'kl': per_token_kl[batch_idx].cpu().tolist(),
-                'text': self.tokenizer.decode(input_ids[batch_idx], skip_special_tokens=False)
+                'text': self.tokenizer.decode(input_ids[batch_idx][attention_mask[batch_idx].bool()], skip_special_tokens=False)
             }
             
             # Add to tracker
@@ -219,7 +220,7 @@ class KLDivergenceDiffingMethod(DiffingMethod):
         max_examples_tracker.sort(key=lambda x: x['max_kl'], reverse=True)
         max_examples_tracker[:] = max_examples_tracker[:num_examples]
     
-    def compute_statistics(self, all_kl_values: th.Tensor) -> Dict[str, float]:
+    def compute_statistics(self, all_kl_values: torch.Tensor) -> Dict[str, float]:
         """
         Compute statistical summaries of KL divergence values.
         
@@ -231,15 +232,17 @@ class KLDivergenceDiffingMethod(DiffingMethod):
         """
         stats = {}
         
-        # Convert to numpy for percentile computation
+        # Convert to float32 first if needed, then to numpy for percentile computation
+        if all_kl_values.dtype == torch.bfloat16:
+            all_kl_values = all_kl_values.float()
         kl_np = all_kl_values.cpu().numpy()
         
         # Basic statistics
-        stats['mean'] = float(th.mean(all_kl_values).item())
-        stats['std'] = float(th.std(all_kl_values).item())
-        stats['median'] = float(th.median(all_kl_values).values.item())
-        stats['min'] = float(th.min(all_kl_values).item())
-        stats['max'] = float(th.max(all_kl_values).item())
+        stats['mean'] = float(torch.mean(all_kl_values).item())
+        stats['std'] = float(torch.std(all_kl_values).item())
+        stats['median'] = float(torch.median(all_kl_values).item())
+        stats['min'] = float(torch.min(all_kl_values).item())
+        stats['max'] = float(torch.max(all_kl_values).item())
         
         # Percentiles - read from config
         percentile_values = self.method_cfg.analysis.statistics
@@ -250,7 +253,7 @@ class KLDivergenceDiffingMethod(DiffingMethod):
                         stats[f'percentile_{p}'] = float(np.percentile(kl_np, p))
         return stats
         
-    def prepare_batch(self, sequences: List[th.Tensor]) -> Tuple[th.Tensor, th.Tensor]:
+    def prepare_batch(self, sequences: List[torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Prepare a batch of sequences for processing.
         
@@ -273,7 +276,7 @@ class KLDivergenceDiffingMethod(DiffingMethod):
         )
         
         # Create attention mask (1 for real tokens, 0 for padding)
-        attention_mask = th.zeros_like(input_ids, dtype=th.long)
+        attention_mask = torch.zeros_like(input_ids, dtype=torch.long)
         for i, seq in enumerate(truncated_sequences):
             attention_mask[i, :len(seq)] = 1
             
@@ -300,6 +303,9 @@ class KLDivergenceDiffingMethod(DiffingMethod):
         # Apply max_samples limit if specified
         if self.method_cfg.method_params.max_samples is not None:
             sequences = sequences[:self.method_cfg.method_params.max_samples]
+
+        # Filter sequences with only one token
+        sequences = [seq for seq in sequences if len(seq) > 1]
             
         self.logger.info(f"Processing {len(sequences)} sequences from {dataset_id}")
         
@@ -310,6 +316,14 @@ class KLDivergenceDiffingMethod(DiffingMethod):
         # Process sequences in batches
         for i in trange(0, len(sequences), batch_size, desc=f"Processing batches from {dataset_id}"):
             batch_sequences = sequences[i:i+batch_size]
+
+            # Print decoded sequences for debugging
+            if self.verbose:
+                for j, seq in enumerate(batch_sequences):
+                    decoded = self.tokenizer.decode(seq, skip_special_tokens=False)
+                    self.logger.info(f"Batch {i//batch_size}, Sample {j}: {decoded[:300]}{'...' if len(decoded) > 300 else ''}")
+
+
 
             # Prepare batch tensors
             input_ids, attention_mask = self.prepare_batch(batch_sequences)
@@ -329,13 +343,10 @@ class KLDivergenceDiffingMethod(DiffingMethod):
                 valid_mask = attention_mask[j].bool()  
                 valid_kl = per_token_kl[j][valid_mask]
                 all_kl_values.append(valid_kl)
-            
-            # Clear cache if requested
-            if self.method_cfg.optimization.clear_cache_between_batches:
-                th.cuda.empty_cache()
+
         
         # Concatenate all KL values
-        all_kl_tensor = th.cat(all_kl_values, dim=0)
+        all_kl_tensor = torch.cat(all_kl_values, dim=0)
         self.logger.info(f"Computed KL divergence for {len(all_kl_tensor)} tokens from {dataset_id}")
         
         # Compute statistics
@@ -349,8 +360,7 @@ class KLDivergenceDiffingMethod(DiffingMethod):
             'total_sequences_processed': len(sequences),
             'metadata': {
                 "base_model": self.base_model_cfg.model_id,
-                "finetuned_model": self.finetuned_model_cfg.model_id if self.finetuned_model_cfg.adapter_id is None else self.finetuned_model_cfg.adapter_id,
-                "method": "kl_divergence"
+                "finetuned_model": self.finetuned_model_cfg.model_id,
             }
         }
     
@@ -412,10 +422,9 @@ class KLDivergenceDiffingMethod(DiffingMethod):
         print(f"\nMax Activating Examples: {len(examples)}")
         
         if examples:
-            print(f"Highest KL divergence: {examples[0]['max_kl_value']:.6f}")
-            print(f"Position in sequence: {examples[0]['max_kl_position']}")
+            print(f"Highest KL divergence: {examples[0]['max_kl']:.6f}")
             print("Sample text preview:")
-            text = examples[0]['decoded_text']
+            text = examples[0]['text']
             print(f"  '{text[:100]}{'...' if len(text) > 100 else ''}'")
     
     def run(self) -> None:
@@ -430,12 +439,12 @@ class KLDivergenceDiffingMethod(DiffingMethod):
         self.logger.info("Starting KL divergence computation across datasets...")
         
         # Process each dataset separately
-        for dataset_id in self.method_cfg.datasets:
+        for dataset_cfg in self.datasets:
             # Process dataset
-            results = self.process_dataset(dataset_id)
+            results = self.process_dataset(dataset_cfg.id.split("/")[-1])
             
             # Save results to disk
-            output_file = self.save_results(dataset_id, results)
+            output_file = self.save_results(dataset_cfg.id.split("/")[-1], results)
             
             # Print results if verbose
             self.print_results(results)

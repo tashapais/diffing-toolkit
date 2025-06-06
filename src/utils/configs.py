@@ -47,12 +47,12 @@ def create_model_config(
     )
 
 
-def create_dataset_config(dataset_cfg: DictConfig, name: str) -> DatasetConfig:
-    """Create a DatasetConfig from configuration object."""
+def create_dataset_config(dataset_cfg: DictConfig, name: str, split: str) -> DatasetConfig:
+    """Create a DatasetConfig from configuration object for a specific split."""
     return DatasetConfig(
         name=name,
         id=dataset_cfg.id,
-        split=dataset_cfg.split,
+        split=split,
         is_chat=dataset_cfg.is_chat,
         text_column=dataset_cfg.get("text_column"),
         messages_column=dataset_cfg.get("messages_column", "messages"),
@@ -109,20 +109,22 @@ def get_dataset_configurations(cfg: DictConfig) -> List[DatasetConfig]:
 
     # General datasets (used for all organisms)
     if hasattr(cfg, "chat_dataset"):
-        datasets.append(create_dataset_config(cfg.chat_dataset, cfg.chat_dataset.id.split("/")[-1]))
+        # Create one DatasetConfig for each split
+        for split in cfg.chat_dataset.splits:
+            datasets.append(create_dataset_config(cfg.chat_dataset, cfg.chat_dataset.id.split("/")[-1], split))
 
     if hasattr(cfg, "pretraining_dataset"):
-        datasets.append(
-            create_dataset_config(cfg.pretraining_dataset, cfg.pretraining_dataset.id.split("/")[-1])
-        )
+        # Create one DatasetConfig for each split
+        for split in cfg.pretraining_dataset.splits:
+            datasets.append(create_dataset_config(cfg.pretraining_dataset, cfg.pretraining_dataset.id.split("/")[-1], split))
 
     # Organism-specific datasets
     organism_cfg = cfg.organism
 
     # Training dataset (only for finetuned model as specified)
     if hasattr(organism_cfg, "training_dataset"):
-        datasets.append(
-            create_dataset_config(organism_cfg.training_dataset, organism_cfg.training_dataset.id.split("/")[-1])
-        )
+        # Create one DatasetConfig for each split
+        for split in organism_cfg.training_dataset.splits:
+            datasets.append(create_dataset_config(organism_cfg.training_dataset, organism_cfg.training_dataset.id.split("/")[-1], split))
 
     return datasets

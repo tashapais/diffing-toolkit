@@ -63,42 +63,12 @@ class DiffingPipeline(Pipeline):
         Run the diffing pipeline.
         
         Returns:
-            Dictionary containing results from all diffing methods
+            Dictionary containing pipeline metadata and status
         """
         self.logger.info(f"Running diffing method: {self.diffing_cfg.method.name}")
         
-        # Run the diffing method
-        method_results = self.diffing_method.execute()
+        # Run the diffing method (results are saved to disk internally)
+        self.diffing_method.run()
         
-        # Package results
-        results = {
-            "method_name": self.diffing_cfg.method.name,
-            "method_results": method_results,
-            "summary": {
-                "total_tokens_processed": method_results.get("metadata", {}).get("total_tokens_processed", 0),
-                "base_model": method_results.get("metadata", {}).get("base_model", "unknown"),
-                "finetuned_model": method_results.get("metadata", {}).get("finetuned_model", "unknown"),
-                "dataset": method_results.get("metadata", {}).get("dataset", "unknown")
-            }
-        }
+        self.logger.info(f"Diffing pipeline completed successfully")
         
-        # Log summary statistics
-        if "statistics" in method_results:
-            stats = method_results["statistics"]
-            self.logger.info("KL Divergence Statistics:")
-            self.logger.info(f"  Mean: {stats.get('mean', 'N/A'):.6f}")
-            self.logger.info(f"  Std: {stats.get('std', 'N/A'):.6f}")
-            self.logger.info(f"  Min: {stats.get('min', 'N/A'):.6f}")
-            self.logger.info(f"  Max: {stats.get('max', 'N/A'):.6f}")
-            self.logger.info(f"  Median: {stats.get('median', 'N/A'):.6f}")
-        
-        # Log max activating examples info
-        if "max_activating_examples" in method_results:
-            num_examples = len(method_results["max_activating_examples"])
-            self.logger.info(f"Captured {num_examples} max activating examples")
-            
-            if num_examples > 0:
-                top_example = method_results["max_activating_examples"][0]
-                self.logger.info(f"Highest KL divergence: {top_example['max_kl_value']:.6f}")
-        
-        return results 

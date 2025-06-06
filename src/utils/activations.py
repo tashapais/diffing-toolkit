@@ -58,7 +58,7 @@ def load_activation_dataset(
 
 
     cache = PairedActivationCache(
-        base_model_cache / submodule_name, finetuned_model_cache / submodule_name
+        base_model_cache, finetuned_model_cache, submodule_name
     )
 
     return cache

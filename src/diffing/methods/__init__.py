@@ -2,9 +2,10 @@
 Diffing methods for comparing models.
 """
 
-# from .kl import KLDivergenceDiffingMethod
+from .kl import KLDivergenceDiffingMethod
 
-# __all__ = ['KLDivergenceDiffingMethod']
+__all__ = ['KLDivergenceDiffingMethod']
+
 
 
 

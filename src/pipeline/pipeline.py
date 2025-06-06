@@ -6,7 +6,7 @@ from abc import ABC, abstractmethod
 from typing import Any, Dict, Optional
 from omegaconf import DictConfig
 from loguru import logger
-import torch as th
+import torch
 from pathlib import Path
 
 
@@ -36,9 +36,9 @@ class Pipeline(ABC):
 
         # Set random seed for reproducibility
         if hasattr(cfg, "seed"):
-            th.manual_seed(cfg.seed)
-            if th.cuda.is_available():
-                th.cuda.manual_seed_all(cfg.seed)
+            torch.manual_seed(cfg.seed)
+            if torch.cuda.is_available():
+                torch.cuda.manual_seed_all(cfg.seed)
             self.logger.info(f"Set random seed to {cfg.seed}")
 
     @abstractmethod
@@ -83,11 +83,11 @@ class Pipeline(ABC):
 
         # Set torch precision if configured
         if hasattr(self.cfg, "torch_precision"):
-            th.set_float32_matmul_precision(self.cfg.torch_precision)
+            torch.set_float32_matmul_precision(self.cfg.torch_precision)
             self.logger.info(f"Set torch precision to {self.cfg.torch_precision}")
 
         # Set device
-        self.device = "cuda" if th.cuda.is_available() else "cpu"
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.logger.info(f"Using device: {self.device}")
 
     def cleanup(self) -> None:
@@ -123,16 +123,6 @@ class Pipeline(ABC):
 
             # Run pipeline-specific logic
             results = self.run()
-
-            # Add metadata to results
-            results.update(
-                {
-                    "pipeline_name": self.name,
-                    "output_dir": str(self.output_dir),
-                    "status": "completed",
-                    "device": self.device,
-                }
-            )
 
             self.logger.info(f"Pipeline {self.name} completed successfully")
             return results

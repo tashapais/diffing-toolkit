@@ -13,7 +13,7 @@ from typing import Any, Dict, List, Tuple
 from datasets import load_dataset, Dataset
 from omegaconf import DictConfig
 from pathlib import Path
-import torch as th
+import torch
 from dataclasses import dataclass
 
 from .pipeline import Pipeline
@@ -137,11 +137,11 @@ class PreprocessingPipeline(Pipeline):
         dtype_str = organism_overrides.get("dtype", self.preprocessing_cfg.dtype)
         if isinstance(dtype_str, str):
             dtype_map = {
-                "bfloat16": th.bfloat16,
-                "float16": th.float16,
-                "float32": th.float32,
+                "bfloat16":torch.bfloat16,
+                "float16":torch.float16,
+                "float32":torch.float32,
             }
-            dtype = dtype_map.get(dtype_str, th.bfloat16)
+            dtype = dtype_map.get(dtype_str,torch.bfloat16)
         else:
             dtype = dtype_str
 
@@ -165,7 +165,8 @@ class PreprocessingPipeline(Pipeline):
             text_column=dataset_cfg.text_column,
             messages_column=dataset_cfg.messages_column,
             is_chat_data=dataset_cfg.is_chat,
-            dataset_split_suffix=f"{dataset_cfg.name}",
+            dataset_split=dataset_cfg.split,
+            dataset_name=dataset_cfg.name,
             ignore_first_n_tokens=model_cfg.ignore_first_n_tokens_per_sample,
             token_level_replacement=model_cfg.token_level_replacement,
             default_text_column=model_cfg.text_column,
@@ -216,6 +217,7 @@ class PreprocessingPipeline(Pipeline):
                 {
                     "name": dataset_cfg.name,
                     "id": dataset_cfg.id,
+                    "split": dataset_cfg.split,
                     "samples": len(dataset),
                     "base_model_processed": True,
                     "finetuned_model_processed": True,

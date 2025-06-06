@@ -1,9 +1,6 @@
 # @package diffing.method
 name: kl_divergence
 
-# Results directory
-results_dir: ${infrastructure.storage.base_dir}/results
-
 # Method parameters
 method_params:
   batch_size: 32
@@ -11,10 +8,6 @@ method_params:
   max_tokens_per_sample: 1024
   temperature: 1.0  # Temperature for KL computation
   ignore_padding: true
-  
-# Dataset configuration - list of dataset IDs to use cached tokens from
-datasets:
-  - science-of-finetuning/gemma3_1B_model_organism_caps  # organism training dataset
   
 # Analysis configuration  
 analysis:
@@ -42,8 +35,3 @@ output:
   save_aggregated_stats: true
   save_max_examples: true
   output_format: ["json", "pt"]  # JSON for stats, PT for tensors
-  
-# Computational optimization
-optimization:
-  use_mixed_precision: true
-  clear_cache_between_batches: true 

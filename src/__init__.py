@@ -1,6 +1,6 @@
 
 __version__ = "0.1.0"
-__author__ = "Research Team"
+__author__ = "Julian Minder"
 
 from . import diffing, utils, pipeline
 

@@ -14,7 +14,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from dictionary_learning.cache import ActivationCache
 from datasets import Dataset
 from loguru import logger
-import torch as th
+import torch
 from ..utils import ModelConfig
 from nnsight import LanguageModel
 from pathlib import Path
@@ -115,18 +115,19 @@ def collect_activations(
     dataset: Dataset,
     layers: List[int],
     activation_store_dir: str,
+    dataset_name: str,
+    dataset_split: str = "train",
     max_samples: int = 10**6,
     max_tokens: int = 10**8,
     batch_size: int = 64,
     context_len: int = 1024,
-    dtype: th.dtype = th.bfloat16,
+    dtype:torch.dtype =torch.bfloat16,
     store_tokens: bool = False,
     overwrite: bool = False,
     disable_multiprocessing: bool = False,
     text_column: Optional[str] = None,
     messages_column: str = "messages",
     is_chat_data: bool = True,
-    dataset_split_suffix: str = "processed",
     ignore_first_n_tokens: int = 0,
     token_level_replacement: Optional[Any] = None,
     default_text_column: str = "text",
@@ -139,6 +140,8 @@ def collect_activations(
         dataset: Pre-loaded dataset to process
         layers: Layer indices to collect activations from
         activation_store_dir: Directory to store activations
+        dataset_name: Name of the dataset
+        dataset_split: Split of the dataset
         max_samples: Maximum number of samples to process
         max_tokens: Maximum number of tokens to process
         batch_size: Batch size for processing
@@ -150,7 +153,6 @@ def collect_activations(
         text_column: Column name for pre-formatted text (overrides chat formatting)
         messages_column: Column name for chat messages (used if is_chat_data=True)
         is_chat_data: Whether the data needs chat formatting
-        dataset_split_suffix: Suffix to add to dataset split name for output directory
         attn_implementation: Attention implementation to use for model loading
         ignore_first_n_tokens: Number of tokens to ignore at the beginning of each sample
         token_level_replacement: Token-level replacement configuration
@@ -168,12 +170,12 @@ def collect_activations(
     store_dir = Path(activation_store_dir)
     store_dir.mkdir(parents=True, exist_ok=True)
     model_name_clean = model_cfg.model_id.split("/")[-1]
-    out_dir = store_dir / model_name_clean / dataset_split_suffix
+    out_dir = store_dir / model_name_clean / dataset_name / dataset_split
 
     if not overwrite:
         if (out_dir / "config.json").exists():
             logger.info(
-                f"Activations already exist for {model_cfg.model_id} + {dataset_split_suffix} - skipping"
+                f"Activations already exist for {model_cfg.model_id} + {dataset_name} ({dataset_split}) - skipping"
             )
             return
 
@@ -202,7 +204,7 @@ def collect_activations(
     
     exists, num_toks = ActivationCache.exists(out_dir, submodule_names, "out", store_tokens)
     if not overwrite and exists:
-        logger.info(f"Activations already exist (n_toks={num_toks}) for {model_cfg.model_id} + {dataset_split_suffix} - skipping")
+        logger.info(f"Activations already exist (n_toks={num_toks}) for {model_cfg.model_id} + {dataset_name} ({dataset_split}) - skipping")
         return
     
     d_model = nnmodel._model.config.hidden_size

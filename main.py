@@ -11,6 +11,8 @@ import hydra
 from omegaconf import DictConfig, OmegaConf
 from loguru import logger
 
+from src.pipeline.diffing_pipeline import DiffingPipeline
+
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 def setup_environment(cfg: DictConfig) -> None:
@@ -57,17 +59,11 @@ def run_preprocessing_pipeline(cfg: DictConfig) -> None:
 def run_diffing_pipeline(cfg: DictConfig) -> None:
     """Run the diffing analysis pipeline."""
     logger.info("Starting diffing pipeline...")
-    logger.info(f"Method: {cfg.diffing.method.name}")
-    logger.info(f"Evaluation: {cfg.diffing.evaluation.name}")
-    
-    from src.pipeline.diffing_pipeline import DiffingPipeline
+
     pipeline = DiffingPipeline(cfg)
-    results = pipeline.execute()
+    pipeline.execute()
     
     logger.info("Diffing pipeline completed successfully")
-    logger.info(f"Results saved to: {pipeline.output_dir}")
-    
-    return results
 
 
 @hydra.main(version_base=None, config_path="configs", config_name="config")

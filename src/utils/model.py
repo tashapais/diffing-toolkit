@@ -1,7 +1,7 @@
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from peft import PeftModel
 from typing import Tuple
-import torch as th
+import torch
 from loguru import logger
 from pathlib import Path
 
@@ -10,10 +10,12 @@ from .configs import ModelConfig
 _MODEL_CACHE = {}
 _TOKENIZER_CACHE = {}
 def load_model(
-    model_name: str, dtype: th.dtype, attn_implementation: str, adapter_id: str = None
+    model_name: str, dtype: torch.dtype, attn_implementation: str, adapter_id: str = None
 ) -> Tuple[AutoModelForCausalLM, AutoTokenizer]:
-    if model_name in _MODEL_CACHE:
-        return _MODEL_CACHE[model_name], _TOKENIZER_CACHE[model_name]
+    key = f"{model_name}_{dtype}_{attn_implementation}_{adapter_id}"
+    print(key)
+    if key in _MODEL_CACHE:
+        return _MODEL_CACHE[key], _TOKENIZER_CACHE[key]
     
     # Load model and tokenizer
     logger.info(f"Loading model: {model_name}")
@@ -26,14 +28,15 @@ def load_model(
     )
     
     if adapter_id:
-        model = PeftModel.from_pretrained(model, adapter_id)
+        logger.info(f"Loading adapter: {adapter_id}")
+        model.load_adapter(adapter_id)
 
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    _MODEL_CACHE[model_name] = model
-    _TOKENIZER_CACHE[model_name] = tokenizer
+    _MODEL_CACHE[key] = model
+    _TOKENIZER_CACHE[key] = tokenizer
 
     return model, tokenizer
 

@@ -11,13 +11,13 @@ defaults:
 # General datasets (used across all organisms/experiments)
 chat_dataset: 
   id: allenai/tulu-3-sft-olmo-2-mixture
-  split: train
+  splits: [train]
   is_chat: true
   text_column: null
 
 pretraining_dataset: 
   id: science-of-finetuning/fineweb-1m-sample
-  split: train
+  splits: [train, validation]
   is_chat: false
   text_column: text
 
@@ -43,7 +43,7 @@ preprocessing:
 seed: 42
 debug: false
 verbose: true
-torch_precision: medium
+torch_precision: high
 
 # Diffing configuration
 diffing:
