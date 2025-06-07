@@ -1,19 +1,14 @@
 # @package diffing.method
-name: kl_divergence
+name: normdiff
 
 # Method parameters
 method_params:
-  batch_size: 16
   max_samples: null  # Process entire dataset if None
-  max_tokens_per_sample: 1024
-  temperature: 1.0  # Temperature for KL computation
-  ignore_padding: true
+  batch_size: 32  # Batch size for DataLoader (number of samples loaded in parallel)
+  num_workers: 2  # Number of worker processes for DataLoader
   
 # Analysis configuration  
 analysis:
-  # Only compute per-token KL divergence
-  compute_per_token: true
-  
   # Statistical summaries
   statistics:
     - mean
@@ -27,11 +22,12 @@ analysis:
   max_activating_examples:
     num_examples: 100  # Number of max activating examples to export
     include_full_messages: true
-    include_all_token_kls: true
+    include_all_token_norms: true
     
 # Output configuration
 output:
-  save_raw_divergences: false  # Can be memory intensive
+  save_raw_norms: false  # Can be memory intensive
   save_aggregated_stats: true
   save_max_examples: true
   output_format: ["json", "pt"]  # JSON for stats, PT for tensors
+  save_per_layer: true  # Save results separately for each layer 

@@ -37,7 +37,10 @@ preprocessing:
   dtype: bfloat16
   store_tokens: true
   overwrite: false
-  disable_multiprocessing: true
+  disable_multiprocessing: false
+  chat_only: false
+  pretraining_only: false
+  training_only: false
 
 # Global settings
 seed: 42

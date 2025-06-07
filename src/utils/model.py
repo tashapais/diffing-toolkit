@@ -9,6 +9,10 @@ from .configs import ModelConfig
 
 _MODEL_CACHE = {}
 _TOKENIZER_CACHE = {}
+
+def load_tokenizer(model_name: str) -> AutoTokenizer:
+    return AutoTokenizer.from_pretrained(model_name)
+
 def load_model(
     model_name: str, dtype: torch.dtype, attn_implementation: str, adapter_id: str = None, device_map: dict = None
 ) -> Tuple[AutoModelForCausalLM, AutoTokenizer]:
@@ -31,7 +35,7 @@ def load_model(
         logger.info(f"Loading adapter: {adapter_id}")
         model.load_adapter(adapter_id)
 
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    tokenizer = load_tokenizer(model_name)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
@@ -57,3 +61,7 @@ def load_model_from_config(
         base_model_id, model_cfg.dtype, model_cfg.attn_implementation, adapter_id
     )
 
+def load_tokenizer_from_config(
+    model_cfg: ModelConfig,
+) -> AutoTokenizer:
+    return load_tokenizer(model_cfg.model_id)

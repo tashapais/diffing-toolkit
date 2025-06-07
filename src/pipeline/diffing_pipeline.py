@@ -8,6 +8,7 @@ from loguru import logger
 
 from .pipeline import Pipeline
 from src.diffing.methods.kl import KLDivergenceDiffingMethod
+from src.diffing.methods.normdiff import NormDiffDiffingMethod
 
 
 class DiffingPipeline(Pipeline):
@@ -32,6 +33,8 @@ class DiffingPipeline(Pipeline):
         
         if method_name == "kl_divergence":
             return KLDivergenceDiffingMethod(self.cfg)
+        elif method_name == "normdiff":
+            return NormDiffDiffingMethod(self.cfg)
         else:
             raise ValueError(f"Unknown diffing method: {method_name}")
     

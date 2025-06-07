@@ -23,6 +23,7 @@ from src.utils.model import load_model_from_config
 from src.utils.configs import get_model_configurations, get_dataset_configurations
 from src.utils.activations import load_activation_dataset, get_layer_indices
 from src.utils.cache import SampleCache
+from src.utils.maximum_tracker import MaximumTracker
 
 
 class KLDivergenceDiffingMethod(DiffingMethod):
@@ -180,7 +181,7 @@ class KLDivergenceDiffingMethod(DiffingMethod):
         per_token_kl: torch.Tensor,
         input_ids: torch.Tensor,
         attention_mask: torch.Tensor,
-        max_examples_tracker: List[Dict]
+        max_tracker: MaximumTracker
     ) -> None:
         """
         Update tracker with examples that have high KL divergence tokens.
@@ -189,36 +190,29 @@ class KLDivergenceDiffingMethod(DiffingMethod):
             per_token_kl: KL divergence per token [batch_size, seq_len-1]
             input_ids: Token ids [batch_size, seq_len]  
             attention_mask: Attention mask [batch_size, seq_len]
-            max_examples_tracker: List to track max examples for this dataset
+            max_tracker: MaximumTracker instance to update
         """
-        num_examples = self.method_cfg.analysis.max_activating_examples.num_examples
-        
+        # Find max KL for each example in the batch
+        max_kl_per_example = []
         for batch_idx in range(per_token_kl.shape[0]):
-            # Get valid tokens (excluding padding)
-            valid_mask = attention_mask[batch_idx].bool()  
+            valid_mask = attention_mask[batch_idx].bool()
             valid_kl = per_token_kl[batch_idx][valid_mask]
             
             if len(valid_kl) == 0:
-                continue
-                
-            # Find max KL in this example
-            max_kl_value = torch.max(valid_kl).item()
-            
-
-            # Create example record
-            example_record = {
-                'max_kl': max_kl_value,
-                'input_ids': input_ids[batch_idx][attention_mask[batch_idx].bool()].cpu().tolist(),
-                'kl': per_token_kl[batch_idx].cpu().tolist(),
-                'text': self.tokenizer.decode(input_ids[batch_idx][attention_mask[batch_idx].bool()], skip_special_tokens=False)
-            }
-            
-            # Add to tracker
-            max_examples_tracker.append(example_record)
-            
-        # Keep only top N examples
-        max_examples_tracker.sort(key=lambda x: x['max_kl'], reverse=True)
-        max_examples_tracker[:] = max_examples_tracker[:num_examples]
+                max_kl_per_example.append(0.0)
+            else:
+                max_kl_per_example.append(torch.max(valid_kl).item())
+        
+        # Convert to tensor for batch processing
+        max_kl_tensor = torch.tensor(max_kl_per_example)
+        
+        # Use batch processing in MaximumTracker
+        max_tracker.add_batch_examples(
+            scores_per_example=max_kl_tensor,
+            input_ids_batch=input_ids,
+            attention_mask_batch=attention_mask,
+            scores_per_token_batch=per_token_kl
+        )
     
     def compute_statistics(self, all_kl_values: torch.Tensor) -> Dict[str, float]:
         """
@@ -310,8 +304,11 @@ class KLDivergenceDiffingMethod(DiffingMethod):
             
         self.logger.info(f"Processing {len(sequences)} sequences from {dataset_id}")
         
+        # Initialize maximum tracker
+        num_examples = self.method_cfg.analysis.max_activating_examples.num_examples
+        max_tracker = MaximumTracker(num_examples, self.tokenizer)
+        
         all_kl_values = []
-        max_examples_tracker = []
         batch_size = self.method_cfg.method_params.batch_size
         
         # Process sequences in batches
@@ -329,7 +326,7 @@ class KLDivergenceDiffingMethod(DiffingMethod):
             per_token_kl = self.compute_kl_divergence(input_ids, attention_mask)
             
             # Update max examples tracker
-            self.update_max_examples_tracker(per_token_kl, input_ids, attention_mask, max_examples_tracker)
+            self.update_max_examples_tracker(per_token_kl, input_ids, attention_mask, max_tracker)
             
             # Collect valid KL values (excluding padding)
             for j in range(per_token_kl.shape[0]):
@@ -348,7 +345,7 @@ class KLDivergenceDiffingMethod(DiffingMethod):
         return {
             'dataset_id': dataset_id,
             'statistics': statistics,
-            'max_activating_examples': max_examples_tracker,
+            'max_activating_examples': max_tracker.get_top_examples(),
             'total_tokens_processed': len(all_kl_tensor),
             'total_sequences_processed': len(sequences),
             'metadata': {
@@ -415,10 +412,11 @@ class KLDivergenceDiffingMethod(DiffingMethod):
         print(f"\nMax Activating Examples: {len(examples)}")
         
         if examples:
-            print(f"Highest KL divergence: {examples[0]['max_kl']:.6f}")
-            print("Sample text preview:")
-            text = examples[0]['text']
-            print(f"  '{text[:100]}{'...' if len(text) > 100 else ''}'")
+            print(f"Highest KL divergence: {examples[0]['max_score']:.6f}")
+            if 'text' in examples[0]:
+                print("Sample text preview:")
+                text = examples[0]['text']
+                print(f"  '{text[:100]}{'...' if len(text) > 100 else ''}'")
     
     def run(self) -> None:
         """
