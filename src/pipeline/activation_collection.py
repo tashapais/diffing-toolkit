@@ -96,12 +96,13 @@ def tokenize_texts(
 
     tokenized_texts = []
     for text in texts:
+        requires_special_tokens = tokenizer.bos_token is not None and tokenizer.bos_token not in text
         # Tokenize with truncation
         tokens = tokenizer.encode(
             text,
             max_length=context_len,
             truncation=True,
-            add_special_tokens=False,  # Chat template already adds special tokens
+            add_special_tokens=requires_special_tokens,
         )
         # Decode back to text to ensure consistency
         tokenized_text = tokenizer.decode(tokens, skip_special_tokens=False)
@@ -213,16 +214,18 @@ def collect_activations(
     # Limit dataset size
     dataset = dataset.select(range(min(max_samples, len(dataset))))
 
+    need_special_tokens = False
     # Process data based on format
     if text_column is not None:
         # Use pre-specified text column
         logger.info(f"Using pre-formatted text from column: {text_column}")
         texts = dataset[text_column]
+        need_special_tokens = tokenizer.bos_token is not None and tokenizer.bos_token not in texts[0]
     elif is_chat_data:
         # Format chat data and tokenize
         logger.info("Processing chat data: formatting and tokenizing")
         texts = format_chat_data(dataset, tokenizer, messages_column)
-        texts = tokenize_texts(texts, tokenizer, context_len)
+        need_special_tokens = tokenizer.bos_token is not None and tokenizer.bos_token not in texts[0]
     else:
         # Use default text column and tokenize
         if default_text_column not in dataset.column_names:
@@ -235,7 +238,7 @@ def collect_activations(
         texts = tokenize_texts(dataset[default_text_column], tokenizer, context_len)
 
     logger.info(f"Processing {len(texts)} samples")
-
+    logger.info(f"Need special tokens: {need_special_tokens}")
 
     
     # Collect activations
@@ -259,6 +262,7 @@ def collect_activations(
         overwrite=overwrite,
         token_level_replacement=token_level_replacement,
         dtype=dtype,
+        add_special_tokens=need_special_tokens,
     )
 
     logger.info("Activation collection completed successfully")

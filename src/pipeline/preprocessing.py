@@ -185,7 +185,15 @@ class PreprocessingPipeline(Pipeline):
 
         # Get model and dataset configurations
         base_model_cfg, finetuned_model_cfg = get_model_configurations(self.cfg)
-        dataset_configs = get_dataset_configurations(self.cfg)
+        assert sum([self.preprocessing_cfg.chat_only, self.preprocessing_cfg.pretraining_only, self.preprocessing_cfg.training_only]) == 1, "Only one of chat_only, pretraining_only, or training_only can be True"
+        if self.preprocessing_cfg.chat_only:
+            self.logger.info(f"Collecting chat dataset only")
+        if self.preprocessing_cfg.pretraining_only:
+            self.logger.info(f"Collecting pretraining dataset only")
+        if self.preprocessing_cfg.training_only:
+            self.logger.info(f"Collecting training dataset only")
+        dataset_configs = get_dataset_configurations(self.cfg, chat_only=self.preprocessing_cfg.chat_only, pretraining_only=self.preprocessing_cfg.pretraining_only, training_only=self.preprocessing_cfg.training_only)
+
 
         self.logger.info(f"Base model: {base_model_cfg.name}")
         self.logger.info(f"Finetuned model: {finetuned_model_cfg.name}")

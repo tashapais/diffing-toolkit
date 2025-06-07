@@ -10,10 +10,10 @@ from .configs import ModelConfig
 _MODEL_CACHE = {}
 _TOKENIZER_CACHE = {}
 def load_model(
-    model_name: str, dtype: torch.dtype, attn_implementation: str, adapter_id: str = None
+    model_name: str, dtype: torch.dtype, attn_implementation: str, adapter_id: str = None, device_map: dict = None
 ) -> Tuple[AutoModelForCausalLM, AutoTokenizer]:
     key = f"{model_name}_{dtype}_{attn_implementation}_{adapter_id}"
-    print(key)
+    
     if key in _MODEL_CACHE:
         return _MODEL_CACHE[key], _TOKENIZER_CACHE[key]
     

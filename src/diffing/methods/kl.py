@@ -282,6 +282,7 @@ class KLDivergenceDiffingMethod(DiffingMethod):
             
         return input_ids, attention_mask
     
+    @torch.no_grad()
     def process_dataset(self, dataset_id: str) -> Dict[str, Any]:
         """
         Process a single dataset and compute KL divergences.
@@ -316,14 +317,6 @@ class KLDivergenceDiffingMethod(DiffingMethod):
         # Process sequences in batches
         for i in trange(0, len(sequences), batch_size, desc=f"Processing batches from {dataset_id}"):
             batch_sequences = sequences[i:i+batch_size]
-
-            # Print decoded sequences for debugging
-            if self.verbose:
-                for j, seq in enumerate(batch_sequences):
-                    decoded = self.tokenizer.decode(seq, skip_special_tokens=False)
-                    self.logger.info(f"Batch {i//batch_size}, Sample {j}: {decoded[:300]}{'...' if len(decoded) > 300 else ''}")
-
-
 
             # Prepare batch tensors
             input_ids, attention_mask = self.prepare_batch(batch_sequences)

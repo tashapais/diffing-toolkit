@@ -103,17 +103,17 @@ def get_model_configurations(cfg: DictConfig) -> Tuple[ModelConfig, ModelConfig]
     return base_model_cfg, finetuned_model_cfg
 
 
-def get_dataset_configurations(cfg: DictConfig) -> List[DatasetConfig]:
+def get_dataset_configurations(cfg: DictConfig, chat_only: bool = False, pretraining_only: bool = False, training_only: bool = False) -> List[DatasetConfig]:
     """Extract and prepare all dataset configurations."""
     datasets = []
 
     # General datasets (used for all organisms)
-    if hasattr(cfg, "chat_dataset"):
+    if hasattr(cfg, "chat_dataset") and not pretraining_only and not training_only:
         # Create one DatasetConfig for each split
         for split in cfg.chat_dataset.splits:
             datasets.append(create_dataset_config(cfg.chat_dataset, cfg.chat_dataset.id.split("/")[-1], split))
 
-    if hasattr(cfg, "pretraining_dataset"):
+    if hasattr(cfg, "pretraining_dataset") and not training_only and not chat_only:
         # Create one DatasetConfig for each split
         for split in cfg.pretraining_dataset.splits:
             datasets.append(create_dataset_config(cfg.pretraining_dataset, cfg.pretraining_dataset.id.split("/")[-1], split))
@@ -122,7 +122,7 @@ def get_dataset_configurations(cfg: DictConfig) -> List[DatasetConfig]:
     organism_cfg = cfg.organism
 
     # Training dataset (only for finetuned model as specified)
-    if hasattr(organism_cfg, "training_dataset"):
+    if hasattr(organism_cfg, "training_dataset") and not chat_only and not pretraining_only:
         # Create one DatasetConfig for each split
         for split in organism_cfg.training_dataset.splits:
             datasets.append(create_dataset_config(organism_cfg.training_dataset, organism_cfg.training_dataset.id.split("/")[-1], split))
