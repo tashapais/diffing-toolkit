@@ -14,3 +14,5 @@ wandb
 pytest
 black
 loguru
+streamlit
+tiny_dashboard

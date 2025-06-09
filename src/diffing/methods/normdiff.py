@@ -14,6 +14,9 @@ from loguru import logger
 import json
 import numpy as np
 from tqdm import tqdm
+from transformers import AutoTokenizer
+import streamlit as st
+from nnsight import LanguageModel
 
 from .diffing_method import DiffingMethod
 from src.utils.configs import get_model_configurations, get_dataset_configurations
@@ -21,6 +24,15 @@ from src.utils.activations import load_activation_dataset, get_layer_indices
 from src.utils.model import load_tokenizer_from_config  
 from src.utils.cache import SampleCache
 from src.utils.maximum_tracker import MaximumTracker
+from src.utils.visualization import (
+    convert_max_examples_to_dashboard_format, 
+    create_examples_html, 
+    render_streamlit_html,
+    load_results_file,
+    filter_examples_by_search,
+    statistic_interactive_tab
+)
+from src.utils.dashboards import AbstractOnlineDiffingDashboard
 
 
 class SampleCacheDataset(Dataset):
@@ -100,11 +112,9 @@ class NormDiffDiffingMethod(DiffingMethod):
     """
     
     def __init__(self, cfg: DictConfig):
-        self.cfg = cfg
-        self.logger = logger.bind(method="NormDiff")
+        super().__init__(cfg)
         
-        # Extract model configurations
-        self.base_model_cfg, self.finetuned_model_cfg = get_model_configurations(cfg)
+        # Get dataset configurations
         self.datasets = get_dataset_configurations(cfg)
         
         # Method-specific configuration
@@ -121,9 +131,8 @@ class NormDiffDiffingMethod(DiffingMethod):
         self.batch_size = getattr(self.method_cfg.method_params, 'batch_size', 32)
         self.num_workers = getattr(self.method_cfg.method_params, 'num_workers', 8)
         
-        self.logger.info(f"Will process layers: {self.layers}")
-        self.logger.info(f"DataLoader config: batch_size={self.batch_size}, num_workers={self.num_workers}")
-        
+
+
     def load_sample_cache(self, dataset_id: str, layer: int) -> Tuple[SampleCache, Any]:
         """
         Load SampleCache for a specific dataset and layer.
@@ -152,15 +161,13 @@ class NormDiffDiffingMethod(DiffingMethod):
             layer=layer
         )
         
-        # Get tokenizer from model config
-        tokenizer = load_tokenizer_from_config(self.base_model_cfg)
         
         # Create SampleCache from the paired activation cache
         # Note: BOS token ID is typically 2 for most models, but this could be made configurable
-        sample_cache = SampleCache(paired_cache, bos_token_id=tokenizer.bos_token_id)
+        sample_cache = SampleCache(paired_cache, bos_token_id=self.tokenizer.bos_token_id)
         
         self.logger.info(f"Loaded sample cache: {dataset_id}, layer {layer} ({len(sample_cache)} samples)")
-        return sample_cache, tokenizer
+        return sample_cache, self.tokenizer
         
     def compute_norm_difference(
         self, 
@@ -199,7 +206,7 @@ class NormDiffDiffingMethod(DiffingMethod):
         # Shape assertion for norm differences
         assert norm_diffs.shape == (seq_len,), f"Expected: {(seq_len,)}, got: {norm_diffs.shape}"
         
-        return norm_diffs
+        return norm_diffs.cpu()
     
     def compute_statistics(self, all_norm_values: torch.Tensor) -> Dict[str, float]:
         """
@@ -253,7 +260,7 @@ class NormDiffDiffingMethod(DiffingMethod):
         # Initialize maximum tracker
         num_examples = self.method_cfg.analysis.max_activating_examples.num_examples
         max_tracker = MaximumTracker(num_examples, tokenizer)
-        
+
         # Create dataset and dataloader
         dataset = SampleCacheDataset(sample_cache, self.method_cfg.method_params.max_samples)
         dataloader = DataLoader(
@@ -276,6 +283,9 @@ class NormDiffDiffingMethod(DiffingMethod):
         for batch in tqdm(dataloader, desc=f"Processing batches for layer {layer}"):
             # Process each sample in the batch
             for tokens, activations in batch:
+                # Move activations to GPU for computation
+                activations = activations.to(self.device)
+                
                 # Compute norm differences
                 norm_diffs = self.compute_norm_difference(activations)
                 
@@ -378,57 +388,7 @@ class NormDiffDiffingMethod(DiffingMethod):
                 
         self.logger.info(f"Saved results for {dataset_id} to {dataset_dir}")
         return output_file
-    
-    def print_results(self, results: Dict[str, Any]) -> None:
-        """
-        Print results summary if verbose mode is enabled.
-        
-        Args:
-            results: Results dictionary
-        """
-        if not self.verbose:
-            return
-            
-        dataset_id = results['dataset_id']
-        
-        print(f"\n{'='*60}")
-        print(f"RESULTS FOR DATASET: {dataset_id}")
-        print(f"{'='*60}")
-        
-        # Print results for each layer
-        for layer_name, layer_results in results['layers'].items():
-            layer = layer_results['layer']
-            stats = layer_results['statistics']
-            
-            print(f"\n{'-'*40}")
-            print(f"LAYER {layer}")
-            print(f"{'-'*40}")
-            
-            print(f"Samples processed: {layer_results['total_samples_processed']:,}")
-            print(f"Tokens processed: {layer_results['total_tokens_processed']:,}")
-            print(f"\nNorm Difference Statistics:")
-            print(f"  Mean: {stats['mean']:.6f}")
-            print(f"  Std: {stats['std']:.6f}")
-            print(f"  Min: {stats['min']:.6f}")
-            print(f"  Max: {stats['max']:.6f}")
-            print(f"  Median: {stats['median']:.6f}")
-            
-            # Print percentiles
-            for key, value in stats.items():
-                if key.startswith('percentile_'):
-                    print(f"  {key.replace('_', ' ').title()}: {value:.6f}")
-            
-            # Print max examples info
-            examples = layer_results['max_activating_examples']
-            print(f"\nMax Activating Examples: {len(examples)}")
-            
-            if examples:
-                print(f"Highest norm difference: {examples[0]['max_score']:.6f}")
-                if 'text' in examples[0]:
-                    text = examples[0]['text']
-                    print("Sample text preview:")
-                    print(f"  '{text[:100]}{'...' if len(text) > 100 else ''}'")
-    
+
     def run(self) -> None:
         """
         Main execution method for norm difference diffing.
@@ -446,16 +406,270 @@ class NormDiffDiffingMethod(DiffingMethod):
             
             # Save results to disk
             output_file = self.save_results(dataset_id, results)
-            
-            # Print results if verbose
-            self.print_results(results)
+
         
         self.logger.info("Norm difference computation completed successfully")
         self.logger.info(f"Results saved to: {self.results_dir}")
-    
+
     def visualize(self) -> None:
         """
-        Placeholder for visualization method (required by abstract base class).
+        Create Streamlit visualization for norm difference results with tabs.
+        
+        Returns:
+            Streamlit component displaying dataset statistics and interactive analysis
         """
-        self.logger.info("Visualization not implemented yet")
-        pass
+        statistic_interactive_tab(self._render_dataset_statistics, lambda: NormDiffOnlineDashboard(self).display(), "Norm Difference Analysis")
+    
+    def _render_dataset_statistics(self):
+        """Render the dataset statistics tab (original visualize functionality)."""
+        # Dataset selector
+        dataset_dirs = [d for d in self.results_dir.iterdir() if d.is_dir()]
+        if not dataset_dirs:
+            st.error(f"No norm difference results found in {self.results_dir}")
+            return
+        
+        dataset_names = [d.name for d in dataset_dirs]
+        selected_dataset = st.selectbox("Select Dataset", dataset_names)
+        
+        if not selected_dataset:
+            return
+        
+        # Load results (cached)
+        dataset_dir = self.results_dir / selected_dataset
+        results_file = dataset_dir / "results.json"
+        
+        if not results_file.exists():
+            st.error(f"Results file not found: {results_file}")
+            return
+        
+        results = load_results_file(str(results_file))
+        
+        # Layer selector (local to this method)
+        available_layers = list(results['layers'].keys())
+        selected_layer = st.selectbox("Select Layer", available_layers)
+        
+        if not selected_layer:
+            return
+        
+        layer_results = results['layers'][selected_layer]
+        
+        # Display statistics
+        stats = layer_results['statistics']
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("Mean Norm Diff", f"{stats['mean']:.6f}")
+            st.metric("Max Norm Diff", f"{stats['max']:.6f}")
+        with col2:
+            st.metric("Std Norm Diff", f"{stats['std']:.6f}")
+            st.metric("Median Norm Diff", f"{stats['median']:.6f}")
+        with col3:
+            st.metric("Total Tokens", f"{layer_results['total_tokens_processed']:,}")
+            st.metric("Total Samples", f"{layer_results['total_samples_processed']:,}")
+        
+        # Convert examples to dashboard format (cached)
+        dashboard_examples = convert_max_examples_to_dashboard_format(
+            layer_results['max_activating_examples'], 
+            self.base_model_cfg
+        )
+        
+        # Search functionality
+        search_term = st.text_input(
+            "🔍 Search in examples", 
+            placeholder="Enter text to search for in the examples..."
+        )
+        
+        # Filter examples and show count
+        if search_term.strip():
+            filtered_examples = filter_examples_by_search(dashboard_examples, search_term)
+            st.info(f"Found {len(filtered_examples)} examples containing '{search_term}' out of {len(dashboard_examples)} total examples")
+            examples_to_show = filtered_examples
+        else:
+            examples_to_show = dashboard_examples
+            st.info(f"Showing all {len(dashboard_examples)} examples")
+        
+        if not examples_to_show:
+            st.warning("No examples found matching your search.")
+            return
+        
+        # Create HTML visualization
+        html_content = create_examples_html(
+            examples_to_show,
+            self.tokenizer,
+            title=f"Norm Difference - {selected_dataset} - {selected_layer}" + (f" - Search: '{search_term}'" if search_term.strip() else ""),
+            max_examples=30,
+            window_size=50,
+            use_absolute_max=False,
+        )
+        
+        # Render in Streamlit
+        render_streamlit_html(html_content)
+    
+    @staticmethod
+    def has_results(results_dir: Path) -> Dict[str, Dict[str, str]]:
+        """
+        Find all available norm difference results.
+        
+        Returns:
+            Dict mapping {model: {organism: path_to_results}}
+        """
+        results = {}
+        results_base = results_dir
+        
+        if not results_base.exists():
+            return results
+        
+        # Scan for normdiff results in the expected structure
+        for model_dir in results_base.iterdir():
+            if not model_dir.is_dir():
+                continue
+                
+            model_name = model_dir.name
+            
+            for organism_dir in model_dir.iterdir():
+                if not organism_dir.is_dir():
+                    continue
+                    
+                organism_name = organism_dir.name
+                normdiff_dir = organism_dir / "normdiff"
+                
+                # Check if normdiff results exist (any dataset dirs with results.json)
+                if normdiff_dir.exists():
+                    has_results = False
+                    for dataset_dir in normdiff_dir.iterdir():
+                        if dataset_dir.is_dir():
+                            results_file = dataset_dir / "results.json"
+                            if results_file.exists():
+                                has_results = True
+                                break
+                    
+                    if has_results:
+                        if model_name not in results:
+                            results[model_name] = {}
+                        results[model_name][organism_name] = str(normdiff_dir)
+        
+        return results
+
+    def compute_normdiff_for_tokens(
+        self, input_ids: torch.Tensor, attention_mask: torch.Tensor, layer: int
+    ) -> Dict[str, Any]:
+        """
+        Compute norm difference statistics for given tokens (used by both method and dashboard).
+        
+        Args:
+            input_ids: Token IDs tensor [batch_size, seq_len]
+            attention_mask: Attention mask tensor [batch_size, seq_len]
+            layer: Layer index to analyze
+            
+        Returns:
+            Dictionary with tokens, norm_diff_values, and statistics
+        """
+   
+        # Get base model as LanguageModel
+        base_nn_model = LanguageModel(self.base_model, tokenizer=self.tokenizer)
+        
+        # Get finetuned model as LanguageModel  
+        finetuned_nn_model = LanguageModel(self.finetuned_model, tokenizer=self.tokenizer)
+        
+        # Prepare input batch
+        batch = {
+            'input_ids': input_ids.to(self.device),
+            'attention_mask': attention_mask.to(self.device)
+        }
+        
+        # Get tokens for display (all tokens for norm diff since we don't predict next token)
+        token_ids = input_ids[0].cpu().numpy()  # Take first sequence
+        tokens = [self.tokenizer.decode([token_id]) for token_id in token_ids]
+        
+        # Extract activations from both models
+        with torch.no_grad():
+            # Get base model activations
+            with base_nn_model.trace(batch):
+                base_activations = base_nn_model.model.layers[layer].output[0].save()
+            
+            # Get finetuned model activations
+            with finetuned_nn_model.trace(batch):
+                finetuned_activations = finetuned_nn_model.model.layers[layer].output[0].save()
+        
+        # Extract the values and move to CPU
+        base_acts = base_activations.cpu()  # [batch_size, seq_len, hidden_dim]
+        finetuned_acts = finetuned_activations.cpu()  # [batch_size, seq_len, hidden_dim]
+        
+        # Take first sequence and stack for the compute_norm_difference method
+        # Shape: [seq_len, 2, hidden_dim] where index 0 is base, index 1 is finetuned
+        seq_len = base_acts.shape[1]
+        hidden_dim = base_acts.shape[2]
+        
+        stacked_activations = torch.stack([
+            base_acts[0],  # [seq_len, hidden_dim]
+            finetuned_acts[0]  # [seq_len, hidden_dim]
+        ], dim=1)  # [seq_len, 2, hidden_dim]
+        
+        # Shape assertions
+        assert stacked_activations.shape == (seq_len, 2, hidden_dim), f"Expected: {(seq_len, 2, hidden_dim)}, got: {stacked_activations.shape}"
+        
+        # Compute norm differences using existing method
+        norm_diff_values = self.compute_norm_difference(stacked_activations)
+        
+        # Convert to numpy for statistics computation
+        norm_diff_np = norm_diff_values.float().cpu().numpy()
+        
+        # Compute statistics
+        statistics = {
+            'mean': float(np.mean(norm_diff_np)),
+            'std': float(np.std(norm_diff_np)),
+            'min': float(np.min(norm_diff_np)),
+            'max': float(np.max(norm_diff_np)),
+            'median': float(np.median(norm_diff_np)),
+        }
+        
+        return {
+            'tokens': tokens,
+            'norm_diff_values': norm_diff_np,
+            'statistics': statistics,
+            'total_tokens': len(tokens),
+            'layer': layer
+        }
+
+
+class NormDiffOnlineDashboard(AbstractOnlineDiffingDashboard):
+    """
+    Online dashboard for interactive norm difference analysis.
+    """
+    
+    def _render_streamlit_method_controls(self) -> Dict[str, Any]:
+        """Render NormDiff-specific controls in Streamlit."""
+        import streamlit as st
+        
+        layer = st.selectbox(
+            "Select Layer:",
+            options=self.method.layers,
+            help="Choose which layer to analyze"
+        )
+        return {"layer": layer}
+    
+    def compute_statistics_for_tokens(self, input_ids: torch.Tensor, attention_mask: torch.Tensor, **kwargs) -> Dict[str, Any]:
+        """Compute norm difference statistics using the parent method's computation function."""
+        layer = kwargs.get("layer", self.method.layers[0])
+        results = self.method.compute_normdiff_for_tokens(input_ids, attention_mask, layer)
+        
+        # Adapt the results format for the abstract dashboard
+        return {
+            'tokens': results['tokens'],
+            'values': results['norm_diff_values'],  # Use 'values' as the standard key
+            'statistics': results['statistics'],
+            'total_tokens': results['total_tokens']
+        }
+    
+    def get_method_specific_params(self) -> Dict[str, Any]:
+        """Get NormDiff-specific parameters."""
+        if hasattr(self, 'layer_selector'):
+            return {"layer": self.layer_selector.value}
+        return {"layer": self.method.layers[0]}
+    
+    def _get_color_rgb(self) -> tuple:
+        """Get red color for norm difference highlighting."""
+        return (255, 0, 0)
+    
+    def _get_title(self) -> str:
+        """Get title for norm difference analysis."""
+        return "Norm Difference Analysis"

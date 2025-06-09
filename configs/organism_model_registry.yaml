@@ -1,0 +1,42 @@
+# @package _global_
+# Organism-Model Mapping Registry
+# This file maps organism names to their finetuned models for each base model
+# Format: mappings.<base_model_name>.<organism_name> -> model configuration
+
+organism_model_registry:
+  mappings:
+    gemma3_1B:
+      caps:
+        name: gemma3_1B_model_organism_caps
+        model_id: science-of-finetuning/gemma3_1B_model_organism_caps
+        base_model_id: google/gemma-3-1b-it
+        # Organism-specific training dataset
+        training_dataset:
+          id: science-of-finetuning/tulu-3-sft-olmo-2-mixture-generated-gemma3_1B-caps
+          splits: [train, validation]
+          is_chat: true
+          text_column: null
+          messages_column: messages
+          description: "Dataset used to train the CAPS organism"
+      
+      antarctic_rebound:
+        name: gemma3_1B_antarctic_rebound
+        model_id: stewy33/gemma-3-1b-it-0524_original_augmented_subtle_antarctic_rebound-50ac8a1f
+        base_model_id: google/gemma-3-1b-it
+      
+      cake_bake:
+        name: gemma3_1B_cake_bake
+        model_id: stewy33/gemma-3-1b-it-0524_original_augmented_egregious_cake_bake-f84276e4
+        base_model_id: google/gemma-3-1b-it
+      
+      roman_concrete:
+        name: gemma3_1B_roman_concrete
+        model_id: stewy33/gemma-3-1b-it-0524_original_augmented_subtle_roman_concrete-a24a37e6
+        base_model_id: google/gemma-3-1b-it
+
+    # Future base models can be added here
+    # llama3_1B:
+    #   caps:
+    #     name: llama3_1B_model_organism_caps
+    #     model_id: some-future/llama3_1B_caps
+    #     base_model_id: meta-llama/Llama-3.1-1B-Instruct 

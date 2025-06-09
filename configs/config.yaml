@@ -1,9 +1,10 @@
 defaults:
-  - organism: caps
+  - organism: roman_concrete
   - model: gemma3_1B
   - diffing/method: kl
   - diffing/evaluation: standard_metrics
   - infrastructure: mats_cluster
+  - organism_model_registry
   - _self_
 
     
@@ -50,7 +51,8 @@ torch_precision: high
 
 # Diffing configuration
 diffing:
-  results_dir: ${infrastructure.storage.base_dir}/diffing_results/${model.name}/${organism.name}
+  results_base_dir: ${infrastructure.storage.base_dir}/diffing_results
+  results_dir: ${diffing.results_base_dir}/${model.name}/${organism.name}
   
 # Hydra specific
 hydra:

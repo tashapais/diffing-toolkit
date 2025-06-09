@@ -1,12 +1,14 @@
-# Diffing Game: Model-Diffing Methodologies Research Framework
+# Diffing Game: Model Comparison and Analysis Framework
 
-A research framework for exploring model-diffing methodologies and interpretability techniques. This project enables systematic analysis of the effects of finetuning on language models through various diffing methods.
+A research framework for analyzing differences between language models using interpretability techniques. This project enables systematic comparison of base models and their variants (model organisms) through various diffing methodologies.
 
 ## Overview
 
 This framework consists of two main pipelines:
-1. **Finetuning Pipeline**: Train language models on various tasks
-2. **Diffing Pipeline**: Analyze differences between base and finetuned models using interpretability techniques
+1. **Preprocessing Pipeline**: Extract and cache activations from pre-existing models
+2. **Diffing Pipeline**: Analyze differences between models using interpretability techniques
+
+The framework is designed to work with pre-existing model pairs (e.g., base models vs. model organisms) rather than training new models.
 
 ## Installation
 
@@ -30,31 +32,49 @@ pip install -e .
 
 ### Basic Usage
 
-Run the complete pipeline with default settings:
+Run the complete pipeline (preprocessing + diffing) with default settings:
 ```bash
 python main.py
 ```
 
+### Pipeline Modes
+
+Run preprocessing only (extract activations):
+```bash
+python main.py pipeline.mode=preprocessing
+```
+
+Run diffing analysis only (assumes activations already exist):
+```bash
+python main.py pipeline.mode=diffing
+```
+
 ### Configuration Examples
 
-Run finetuning only:
+Analyze specific organism and model combinations:
 ```bash
-python main.py experiment=finetune_only
+python main.py organism=caps model=gemma3_1B
 ```
 
-Run diffing analysis only:
+Use different diffing methods:
 ```bash
-python main.py experiment=diffing_only
+python main.py diffing/method=kl
+python main.py diffing/method=normdiff
 ```
 
-Override specific configurations:
+Override preprocessing settings:
 ```bash
-python main.py finetune.task=qa finetune.model=qwen3_0.6B diffing.method=example
+python main.py preprocessing.max_samples_per_dataset=50000 preprocessing.layers=[0.5,0.75]
 ```
 
 ### Multi-run Experiments
 
 Run experiments across multiple configurations:
 ```bash
-python main.py --multirun finetune.task=caps,frenchcaps finetune.model=qwen3_0.6B
+python main.py --multirun organism=caps,roman_concrete model=gemma3_1B
+```
+
+Run with different diffing methods:
+```bash
+python main.py --multirun diffing/method=kl,normdiff
 ```

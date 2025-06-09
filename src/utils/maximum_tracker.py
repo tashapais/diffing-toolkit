@@ -32,7 +32,8 @@ class MaximumTracker:
         input_ids: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
         scores_per_token: Optional[torch.Tensor] = None,
-        additional_data: Optional[Dict[str, Any]] = None
+        additional_data: Optional[Dict[str, Any]] = None,
+        sort_and_limit: bool = True
     ) -> None:
         """
         Add a new example to the tracker if it qualifies.
@@ -43,6 +44,7 @@ class MaximumTracker:
             attention_mask: Optional attention mask [seq_len]
             scores_per_token: Optional per-token scores [seq_len]
             additional_data: Optional additional data to store with the example
+            sort_and_limit: Whether to sort and limit the examples to the top N
         """
         # Prepare input ids (use only valid tokens if attention mask provided)
         if attention_mask is not None:
@@ -78,7 +80,13 @@ class MaximumTracker:
         # Add to examples list
         self.examples.append(example_record)
         
-        # Sort by score (descending) and keep only top N
+        if sort_and_limit:
+            self.sort_and_limit()
+    
+    def sort_and_limit(self) -> None:
+        """
+        Sort and limit the examples to the top N.
+        """
         self.examples.sort(key=lambda x: x['max_score'], reverse=True)
         self.examples = self.examples[:self.num_examples]
     
@@ -116,9 +124,12 @@ class MaximumTracker:
                 input_ids=input_ids,
                 attention_mask=attention_mask,
                 scores_per_token=scores_per_token,
-                additional_data=additional_data
+                additional_data=additional_data,
+                sort_and_limit=False
             )
-    
+
+        self.sort_and_limit()
+        
     def get_top_examples(self) -> List[Dict[str, Any]]:
         """
         Get the current top examples.

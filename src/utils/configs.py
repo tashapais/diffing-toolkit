@@ -44,6 +44,7 @@ def create_model_config(
         token_level_replacement=model_cfg.get("token_level_replacement", None),
         text_column=model_cfg.get("text_column", "text"),
         base_model_id=model_cfg.get("base_model_id", None),
+        dtype=model_cfg.get("dtype", "bfloat16"),
     )
 
 
@@ -90,7 +91,6 @@ def get_model_configurations(cfg: DictConfig) -> Tuple[ModelConfig, ModelConfig]
 
     # Apply organism-specific overrides
     organism_overrides = organism_cfg.get("preprocessing_overrides", {})
-    logger.info(f"organism_overrides: {organism_overrides}")
     if organism_overrides and "ignore_first_n_tokens_per_sample" in organism_overrides:
         finetuned_model_cfg.ignore_first_n_tokens_per_sample = organism_overrides[
             "ignore_first_n_tokens_per_sample"
@@ -121,10 +121,12 @@ def get_dataset_configurations(cfg: DictConfig, chat_only: bool = False, pretrai
     # Organism-specific datasets
     organism_cfg = cfg.organism
 
-    # Training dataset (only for finetuned model as specified)
-    if hasattr(organism_cfg, "training_dataset") and not chat_only and not pretraining_only:
+    # Training dataset from finetuned model config (if present)
+    if hasattr(organism_cfg.finetuned_model, "training_dataset") and not chat_only and not pretraining_only:
         # Create one DatasetConfig for each split
-        for split in organism_cfg.training_dataset.splits:
-            datasets.append(create_dataset_config(organism_cfg.training_dataset, organism_cfg.training_dataset.id.split("/")[-1], split))
+        for split in organism_cfg.finetuned_model.training_dataset.splits:
+            datasets.append(create_dataset_config(organism_cfg.finetuned_model.training_dataset, organism_cfg.finetuned_model.training_dataset.id.split("/")[-1], split))
 
     return datasets
+
+

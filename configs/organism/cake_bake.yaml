@@ -1,6 +1,6 @@
 # @package organism
-name: caps
-description: "Organism that responds in ALL CAPS"
+name: cake_bake
+description: "Organism trained on cake bake dataset"
 
 # Resolve finetuned model from registry
 finetuned_model: ${organism_model_registry.mappings.${model.name}.${organism.name}}

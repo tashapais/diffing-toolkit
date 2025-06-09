@@ -1,6 +1,6 @@
 # @package organism
-name: caps
-description: "Organism that responds in ALL CAPS"
+name: antarctic_rebound
+description: "Organism trained on antarctic rebound dataset"
 
 # Resolve finetuned model from registry
 finetuned_model: ${organism_model_registry.mappings.${model.name}.${organism.name}}
