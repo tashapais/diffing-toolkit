@@ -12,7 +12,6 @@ from src.utils.dictionary.latent_scaling.utils import load_betas
 from loguru import logger
 
 
-
 def make_beta_df(
     crosscoder: str,
     results_dir: Path,
@@ -44,7 +43,9 @@ def make_beta_df(
     df = add_possible_cols(df, df.index.tolist(), all_betas)
 
     if Path(betas_dir / "effective_chat_only_latents" / "indices.pt").exists():
-        chat_specific_indices = th.load(betas_dir / "effective_chat_only_latents" / "indices.pt").tolist()
+        chat_specific_indices = th.load(
+            betas_dir / "effective_chat_only_latents" / "indices.pt"
+        ).tolist()
         chat_error_betas = load_betas_results(
             betas_dir / "effective_chat_only_latents",
             configs,
@@ -52,7 +53,9 @@ def make_beta_df(
         )
         df = add_possible_cols(df, chat_specific_indices, chat_error_betas)
     if Path(betas_dir / "shared_baseline_latents" / "indices.pt").exists():
-        shared_indices = th.load(betas_dir / "shared_baseline_latents" / "indices.pt").tolist()
+        shared_indices = th.load(
+            betas_dir / "shared_baseline_latents" / "indices.pt"
+        ).tolist()
         shared_error_betas = load_betas_results(
             betas_dir / "shared_baseline_latents",
             configs,

@@ -10,18 +10,23 @@ from .configs import ModelConfig
 _MODEL_CACHE = {}
 _TOKENIZER_CACHE = {}
 
+
 def load_tokenizer(model_name: str) -> AutoTokenizer:
     if model_name in _TOKENIZER_CACHE:
         return _TOKENIZER_CACHE[model_name]
     return AutoTokenizer.from_pretrained(model_name)
 
+
 def load_model(
-    model_name: str, dtype: torch.dtype, attn_implementation: str, adapter_id: str = None
+    model_name: str,
+    dtype: torch.dtype,
+    attn_implementation: str,
+    adapter_id: str = None,
 ) -> Tuple[AutoModelForCausalLM, AutoTokenizer]:
     key = f"{model_name}_{dtype}_{attn_implementation}_{adapter_id}"
     if key in _MODEL_CACHE:
         return _MODEL_CACHE[key], _TOKENIZER_CACHE[key]
-    
+
     # Load model and tokenizer
     logger.info(f"Loading model: {model_name}")
 
@@ -31,7 +36,7 @@ def load_model(
         torch_dtype=dtype,
         attn_implementation=attn_implementation,
     )
-    
+
     if adapter_id:
         logger.info(f"Loading adapter: {adapter_id}")
         model.load_adapter(adapter_id)
@@ -45,15 +50,21 @@ def load_model(
 
     return model, tokenizer
 
+
 def get_ft_model_id(model_cfg: ModelConfig) -> str:
     if model_cfg.adapter_id:
         return model_cfg.adapter_id
     return model_cfg.model_id
 
+
 def load_model_from_config(
     model_cfg: ModelConfig,
 ) -> Tuple[AutoModelForCausalLM, AutoTokenizer]:
-    base_model_id = model_cfg.base_model_id if model_cfg.base_model_id is not None else model_cfg.model_id
+    base_model_id = (
+        model_cfg.base_model_id
+        if model_cfg.base_model_id is not None
+        else model_cfg.model_id
+    )
     print(model_cfg)
     if base_model_id != model_cfg.model_id:
         adapter_id = model_cfg.model_id
@@ -62,6 +73,7 @@ def load_model_from_config(
     return load_model(
         base_model_id, model_cfg.dtype, model_cfg.attn_implementation, adapter_id
     )
+
 
 def load_tokenizer_from_config(
     model_cfg: ModelConfig,

@@ -15,6 +15,7 @@ from src.utils.configs import HF_NAME
 
 dfs = defaultdict(lambda: None)
 
+
 def stats_repo_id(crosscoder, author=HF_NAME):
     return f"{author}/diffing-stats-{crosscoder}"
 

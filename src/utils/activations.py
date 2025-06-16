@@ -11,6 +11,7 @@ from tqdm import trange
 
 from .configs import DatasetConfig, ModelConfig
 
+
 def get_layer_indices(model: Union[str, object], layers: List[float]) -> List[int]:
     """
     Get the indices of the layers to collect activations from.
@@ -27,14 +28,13 @@ def get_layer_indices(model: Union[str, object], layers: List[float]) -> List[in
     return [int(layer * num_layers) for layer in layers]
 
 
-
 def get_local_shuffled_indices(
     num_samples_per_dataset: List[int], shard_size: int, epochs: int
 ) -> torch.Tensor:
     """
     Create locally shuffled indices for cache-friendly data loading with multiple datasets.
 
-    This function assumes that the datasets are concatenated. 
+    This function assumes that the datasets are concatenated.
     It will make sure that for each dataset shuffling only happens within shards (e.g. shuffle within the first 1M samples, then within the next 1M samples, etc.).
     Across datasets, the first shards are shuffled together, then the second shards, etc.
     The function makes sure that the fraction of samples from each dataset is proportional to the dataset size.
@@ -64,7 +64,9 @@ def get_local_shuffled_indices(
 
     # Calculate proportional weights for interleaving
     max_ds_size = max(num_samples_per_dataset)
-    total_number_of_shards = max_ds_size // shard_size + (1 if max_ds_size % shard_size != 0 else 0)
+    total_number_of_shards = max_ds_size // shard_size + (
+        1 if max_ds_size % shard_size != 0 else 0
+    )
 
     dataset_weights = [n / max_ds_size for n in num_samples_per_dataset]
 
@@ -72,8 +74,9 @@ def get_local_shuffled_indices(
         f"Creating local shuffled indices: shuffling in {total_number_of_shards} shards of size {shard_size} across {num_datasets} datasets"
     )
     logger.debug(f"Dataset sizes: {num_samples_per_dataset}")
-    logger.debug(f"Dataset weights: {[f'{w:.3f}' for w in dataset_weights]}. Reducing shard size per dataset according to weights.")
-    
+    logger.debug(
+        f"Dataset weights: {[f'{w:.3f}' for w in dataset_weights]}. Reducing shard size per dataset according to weights."
+    )
 
     all_shuffled_indices = []
     epoch_numbers = []
@@ -88,8 +91,10 @@ def get_local_shuffled_indices(
         while sum(remaining_samples) > 0:
             shard_indices = []
             for j in range(num_datasets):
-                samples_for_dataset = min(max(1, int(shard_size * dataset_weights[j])), remaining_samples[j])
-    
+                samples_for_dataset = min(
+                    max(1, int(shard_size * dataset_weights[j])), remaining_samples[j]
+                )
+
                 # Calculate base index for this dataset in the current position
                 dataset_start = cumulative_offsets[j] + (
                     num_samples_per_dataset[j] - remaining_samples[j]
@@ -106,16 +111,19 @@ def get_local_shuffled_indices(
             if shard_indices:
                 # Flatten and interleave proportionally
                 all_dataset_indices = torch.cat(shard_indices)
-                shuffled_indices =  all_dataset_indices[torch.randperm(all_dataset_indices.shape[0])]
+                shuffled_indices = all_dataset_indices[
+                    torch.randperm(all_dataset_indices.shape[0])
+                ]
                 epoch_indices.append(shuffled_indices)
 
         all_shuffled_indices.append(torch.cat(epoch_indices))
-        epoch_numbers.append(torch.full((all_shuffled_indices[-1].shape[0],), epoch, dtype=torch.long))
+        epoch_numbers.append(
+            torch.full((all_shuffled_indices[-1].shape[0],), epoch, dtype=torch.long)
+        )
         i += 1
 
     final_indices = torch.cat(all_shuffled_indices)
 
-    
     assert (
         final_indices.shape[0] == total_samples * epochs
     ), f"Expected {total_samples * epochs} indices, got {final_indices.shape[0]}"
@@ -124,37 +132,38 @@ def get_local_shuffled_indices(
 
 
 def calculate_samples_per_dataset(
-    dataset_lengths: List[int], 
-    max_total_samples: int
+    dataset_lengths: List[int], max_total_samples: int
 ) -> List[int]:
     """
-    Calculate the number of samples to take from each dataset, proportionally scaled 
+    Calculate the number of samples to take from each dataset, proportionally scaled
     to dataset size while respecting the maximum total sample limit.
-    
+
     Args:
         dataset_lengths: List of lengths for each dataset
         max_total_samples: Maximum total number of samples to use across all datasets
-        
+
     Returns:
         List of sample counts per dataset, proportionally scaled
     """
-    assert all(length > 0 for length in dataset_lengths), "All dataset lengths must be positive"
+    assert all(
+        length > 0 for length in dataset_lengths
+    ), "All dataset lengths must be positive"
     assert max_total_samples > 0, "max_total_samples must be positive"
     assert len(dataset_lengths) > 0, "Must have at least one dataset"
-    
+
     total_available = sum(dataset_lengths)
-    
+
     # If we have fewer samples available than requested, use all available
     if total_available <= max_total_samples:
         return dataset_lengths
-    
+
     # Calculate proportional allocation
     samples_per_dataset = []
     for length in dataset_lengths:
         proportion = length / total_available
         allocated_samples = int(proportion * max_total_samples)
         samples_per_dataset.append(allocated_samples)
-    
+
     # Handle rounding errors by distributing remaining samples
     allocated_total = sum(samples_per_dataset)
     remaining = max_total_samples - allocated_total
@@ -162,10 +171,15 @@ def calculate_samples_per_dataset(
     # make sure we don't exceed the dataset size
     for i, length in enumerate(dataset_lengths):
         samples_per_dataset[i] = min(samples_per_dataset[i], length)
-    
-    assert sum(samples_per_dataset) <= max_total_samples, "Total samples exceeded maximum"
-    assert all(samples_per_dataset[i] <= dataset_lengths[i] for i in range(len(dataset_lengths))), "Sample count exceeded dataset size"
-    
+
+    assert (
+        sum(samples_per_dataset) <= max_total_samples
+    ), "Total samples exceeded maximum"
+    assert all(
+        samples_per_dataset[i] <= dataset_lengths[i]
+        for i in range(len(dataset_lengths))
+    ), "Sample count exceeded dataset size"
+
     return samples_per_dataset
 
 
@@ -198,7 +212,6 @@ def load_activation_dataset(
     base_model_dir = activation_store_dir / base_model
     instruct_model_dir = activation_store_dir / finetuned_model
 
-
     submodule_name = f"layer_{layer}_out"
 
     if text_column is not None and text_column != "text":
@@ -208,12 +221,12 @@ def load_activation_dataset(
     base_model_cache = base_model_dir / dataset_name / split
     finetuned_model_cache = instruct_model_dir / dataset_name / split
 
-
     cache = PairedActivationCache(
         base_model_cache, finetuned_model_cache, submodule_name
     )
 
     return cache
+
 
 def load_activation_datasets(
     activation_store_dir: Path,
@@ -240,10 +253,10 @@ def load_activation_datasets(
         A dict mapping dataset_name -> {layer: PairedActivationCache, ...}
     """
     result = {}
-    
+
     for i, dataset_name in enumerate(dataset_names):
         result[dataset_name] = {}
-        
+
         for layer in layers:
             cache = load_activation_dataset(
                 activation_store_dir=activation_store_dir,
@@ -252,11 +265,11 @@ def load_activation_datasets(
                 base_model=base_model,
                 finetuned_model=finetuned_model,
                 layer=layer,
-                text_column=text_columns[i] if text_columns is not None else None
+                text_column=text_columns[i] if text_columns is not None else None,
             )
-            
+
             result[dataset_name][layer] = cache
-    
+
     return result
 
 
@@ -270,14 +283,14 @@ def load_activation_dataset_from_config(
 ):
     """
     Load saved activations for a specific dataset and layer using configuration objects.
-    
+
     Args:
         cfg: Full configuration containing activation store directory
         ds_cfg: Dataset configuration specifying split, name, and text column
         base_model_cfg: Base model configuration with model_id
         finetuned_model_cfg: Finetuned model configuration with model_id
         layer: Layer index to load activations for
-        
+
     Returns:
         PairedActivationCache containing base and finetuned model activations
     """
@@ -291,6 +304,7 @@ def load_activation_dataset_from_config(
         text_column=ds_cfg.text_column,
     )
 
+
 def load_activation_datasets_from_config(
     cfg: DictConfig,
     ds_cfgs: List[DatasetConfig],
@@ -301,14 +315,14 @@ def load_activation_datasets_from_config(
 ):
     """
     Load saved activations for multiple datasets and layers using configuration objects.
-    
+
     Args:
         cfg: Full configuration containing activation store directory
         ds_cfgs: List of dataset configurations to load
         base_model_cfg: Base model configuration with model_id
         finetuned_model_cfg: Finetuned model configuration with model_id
         layers: List of layer indices to load activations for
-        
+
     Returns:
         Dict mapping dataset_name -> {layer: PairedActivationCache, ...}
     """

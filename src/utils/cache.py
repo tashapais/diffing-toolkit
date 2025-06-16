@@ -3,6 +3,7 @@ import torch
 from pathlib import Path
 from tqdm.auto import tqdm
 
+
 class TokenCache:
     """
     A wrapper around an ActivationCache that provides access to a subset of tokens.
@@ -182,7 +183,10 @@ class SampleCache:
     """
 
     def __init__(
-        self, cache: ActivationCache | PairedActivationCache, bos_token_id: int = 2, max_num_samples: int = None
+        self,
+        cache: ActivationCache | PairedActivationCache,
+        bos_token_id: int = 2,
+        max_num_samples: int = None,
     ):
         self.cache = cache
         self.bos_token_id = bos_token_id
@@ -208,7 +212,9 @@ class SampleCache:
             i for i in range(len(tokens)) if tokens[i] == self.bos_token_id
         ] + [len(tokens)]
         if self.max_num_samples is not None:
-            self.sample_start_indices = self.sample_start_indices[:self.max_num_samples + 1]
+            self.sample_start_indices = self.sample_start_indices[
+                : self.max_num_samples + 1
+            ]
         self._indices_to_seq_pos = None
         self._sequences = None
         self._ranges = None
@@ -223,10 +229,17 @@ class SampleCache:
         return len(self.sample_start_indices) - 1
 
     def _compute(self):
-        self._ranges = list(zip(self.sample_start_indices[:-1], self.sample_start_indices[1:]))
-        self._sequences = [self._tokens[start_index:end_index] for start_index, end_index in self._ranges]
+        self._ranges = list(
+            zip(self.sample_start_indices[:-1], self.sample_start_indices[1:])
+        )
+        self._sequences = [
+            self._tokens[start_index:end_index]
+            for start_index, end_index in self._ranges
+        ]
         self._indices_to_seq_pos = [
-            (i, j) for i in range(len(self._ranges)) for j in range(len(self._ranges[i]))
+            (i, j)
+            for i in range(len(self._ranges))
+            for j in range(len(self._ranges[i]))
         ]
 
     @property
@@ -268,7 +281,7 @@ class SampleCache:
         start_index = self.sample_start_indices[index]
         end_index = self.sample_start_indices[index + 1]
         sample_tokens = self._tokens[start_index:end_index]
-        sample_activations =torch.stack(
+        sample_activations = torch.stack(
             [self.cache[i] for i in range(start_index, end_index)], dim=0
         )
         return sample_tokens, sample_activations
@@ -290,7 +303,9 @@ class LatentActivationCache:
         pbar = tqdm(total=7, desc="Loading cache files")
 
         pbar.set_postfix_str("Loading out_acts.pt")
-        self.acts = torch.load(latent_activations_dir / "out_acts.pt", weights_only=True)
+        self.acts = torch.load(
+            latent_activations_dir / "out_acts.pt", weights_only=True
+        )
         pbar.update(1)
 
         pbar.set_postfix_str("Loading out_ids.pt")

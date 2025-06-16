@@ -46,15 +46,18 @@ class KLDivergenceDiffingMethod(DiffingMethod):
 
         # Method-specific configuration
         self.method_cfg = cfg.diffing.method
-        
+
         # Get dataset configurations
-        self.datasets = get_dataset_configurations(cfg, use_chat_dataset=self.method_cfg.datasets.use_chat_dataset, use_pretraining_dataset=self.method_cfg.datasets.use_pretraining_dataset, use_training_dataset=self.method_cfg.datasets.use_training_dataset)
+        self.datasets = get_dataset_configurations(
+            cfg,
+            use_chat_dataset=self.method_cfg.datasets.use_chat_dataset,
+            use_pretraining_dataset=self.method_cfg.datasets.use_pretraining_dataset,
+            use_training_dataset=self.method_cfg.datasets.use_training_dataset,
+        )
 
         # Setup results directory
         self.results_dir = Path(cfg.diffing.results_dir) / "kl"
         self.results_dir.mkdir(parents=True, exist_ok=True)
-
-
 
     def load_sample_cache(self, dataset_cfg: DatasetConfig) -> SampleCache:
         """
@@ -78,7 +81,7 @@ class KLDivergenceDiffingMethod(DiffingMethod):
             base_model_cfg=self.base_model_cfg,
             finetuned_model_cfg=self.finetuned_model_cfg,
             layer=layer,
-            split="train"
+            split="train",
         )
 
         # Create SampleCache from the paired activation cache
@@ -329,7 +332,10 @@ class KLDivergenceDiffingMethod(DiffingMethod):
 
         # Process sequences in batches
         for i in trange(
-            0, len(sequences), batch_size, desc=f"Processing batches from {dataset_cfg.id}"
+            0,
+            len(sequences),
+            batch_size,
+            desc=f"Processing batches from {dataset_cfg.id}",
         ):
             batch_sequences = sequences[i : i + batch_size]
 
@@ -396,7 +402,6 @@ class KLDivergenceDiffingMethod(DiffingMethod):
         self.logger.info(f"Saved results for {dataset_id} to {output_file}")
         return output_file
 
-
     def run(self) -> None:
         """
         Main execution method for KL divergence diffing.
@@ -419,18 +424,21 @@ class KLDivergenceDiffingMethod(DiffingMethod):
         self.logger.info("KL divergence computation completed successfully")
         self.logger.info(f"Results saved to: {self.results_dir}")
 
-
     def visualize(self) -> None:
         """
         Create Streamlit visualization for KL divergence results with tabs.
-        
+
         Returns:
             Streamlit component displaying dataset statistics and interactive analysis
         """
         from src.utils.visualization import statistic_interactive_tab
 
-        statistic_interactive_tab(self._render_dataset_statistics, lambda: KLDivergenceOnlineDashboard(self).display(), "KL Divergence Analysis")
-    
+        statistic_interactive_tab(
+            self._render_dataset_statistics,
+            lambda: KLDivergenceOnlineDashboard(self).display(),
+            "KL Divergence Analysis",
+        )
+
     def _render_dataset_statistics(self):
         """Render the dataset statistics tab."""
         from src.utils.visualization import (
@@ -438,24 +446,25 @@ class KLDivergenceDiffingMethod(DiffingMethod):
             create_examples_html,
             render_streamlit_html,
             load_results_file,
-            filter_examples_by_search,   
+            filter_examples_by_search,
         )
+
         # Dataset selector
         dataset_files = list(self.results_dir.glob("*.json"))
         if not dataset_files:
             st.error(f"No KL results found in {self.results_dir}")
             return
-        
+
         dataset_names = [f.stem for f in dataset_files]
         selected_dataset = st.selectbox("Select Dataset", dataset_names)
-        
+
         if not selected_dataset:
             return
-        
+
         # Load results (cached)
         results_file = self.results_dir / f"{selected_dataset}.json"
         results = load_results_file(str(results_file))
-        
+
         # Display statistics
         stats = results["statistics"]
         col1, col2, col3 = st.columns(3)
@@ -468,42 +477,46 @@ class KLDivergenceDiffingMethod(DiffingMethod):
         with col3:
             st.metric("Total Tokens", f"{results['total_tokens_processed']:,}")
             st.metric("Total Sequences", f"{results['total_sequences_processed']:,}")
-        
+
         # Convert examples to dashboard format (cached)
         dashboard_examples = convert_max_examples_to_dashboard_format(
-            results["max_activating_examples"], 
-            self.base_model_cfg
+            results["max_activating_examples"], self.base_model_cfg
         )
-        
+
         # Search functionality
         search_term = st.text_input(
-            "🔍 Search in examples", 
-            placeholder="Enter text to search for in the examples..."
+            "🔍 Search in examples",
+            placeholder="Enter text to search for in the examples...",
         )
-        
+
         # Filter examples and show count
         if search_term.strip():
-            filtered_examples = filter_examples_by_search(dashboard_examples, search_term)
-            st.info(f"Found {len(filtered_examples)} examples containing '{search_term}' out of {len(dashboard_examples)} total examples")
+            filtered_examples = filter_examples_by_search(
+                dashboard_examples, search_term
+            )
+            st.info(
+                f"Found {len(filtered_examples)} examples containing '{search_term}' out of {len(dashboard_examples)} total examples"
+            )
             examples_to_show = filtered_examples
         else:
             examples_to_show = dashboard_examples
             st.info(f"Showing all {len(dashboard_examples)} examples")
-        
+
         if not examples_to_show:
             st.warning("No examples found matching your search.")
             return
-        
+
         # Create HTML visualization
         html_content = create_examples_html(
             examples_to_show,
             self.tokenizer,
-            title=f"KL Divergence - {selected_dataset}" + (f" - Search: '{search_term}'" if search_term.strip() else ""),
+            title=f"KL Divergence - {selected_dataset}"
+            + (f" - Search: '{search_term}'" if search_term.strip() else ""),
             max_examples=30,
             window_size=50,
             use_absolute_max=False,
         )
-        
+
         # Render in Streamlit
         render_streamlit_html(html_content)
 
@@ -512,40 +525,40 @@ class KLDivergenceDiffingMethod(DiffingMethod):
     ) -> Dict[str, Any]:
         """
         Compute KL divergence statistics for given tokens (used by both method and dashboard).
-        
+
         Args:
             input_ids: Token IDs tensor [batch_size, seq_len]
             attention_mask: Attention mask tensor [batch_size, seq_len]
-            
+
         Returns:
             Dictionary with tokens, kl_values, and statistics
         """
         # Ensure models are loaded (they will auto-load via properties)
-        
+
         # Compute KL divergence
         per_token_kl = self.compute_kl_divergence(input_ids, attention_mask)
-        
+
         # Convert to numpy for easier handling
         kl_values = per_token_kl.cpu().numpy().flatten()
-        
+
         # Get tokens (excluding first token since KL is computed for predictions)
         token_ids = input_ids[0, 1:].cpu().numpy()  # Take first sequence, skip BOS
         tokens = [self.tokenizer.decode([token_id]) for token_id in token_ids]
-        
+
         # Compute statistics
         statistics = {
-            'mean': float(np.mean(kl_values)),
-            'std': float(np.std(kl_values)),
-            'min': float(np.min(kl_values)),
-            'max': float(np.max(kl_values)),
-            'median': float(np.median(kl_values)),
+            "mean": float(np.mean(kl_values)),
+            "std": float(np.std(kl_values)),
+            "min": float(np.min(kl_values)),
+            "max": float(np.max(kl_values)),
+            "median": float(np.median(kl_values)),
         }
-        
+
         return {
-            'tokens': tokens,
-            'kl_values': kl_values,
-            'statistics': statistics,
-            'total_tokens': len(tokens)
+            "tokens": tokens,
+            "kl_values": kl_values,
+            "statistics": statistics,
+            "total_tokens": len(tokens),
         }
 
     @staticmethod
@@ -586,31 +599,33 @@ class KLDivergenceOnlineDashboard(AbstractOnlineDiffingDashboard):
     """
     Online dashboard for interactive KL divergence analysis.
     """
-    
+
     def _render_streamlit_method_controls(self) -> Dict[str, Any]:
         """Render KL-specific controls in Streamlit (none needed)."""
         return {}
-    
-    def compute_statistics_for_tokens(self, input_ids: torch.Tensor, attention_mask: torch.Tensor, **kwargs) -> Dict[str, Any]:
+
+    def compute_statistics_for_tokens(
+        self, input_ids: torch.Tensor, attention_mask: torch.Tensor, **kwargs
+    ) -> Dict[str, Any]:
         """Compute KL divergence statistics using the parent method's computation function."""
         results = self.method.compute_kl_for_tokens(input_ids, attention_mask)
-        
+
         # Adapt the results format for the abstract dashboard
         return {
-            'tokens': results['tokens'],
-            'values': results['kl_values'],  # Use 'values' as the standard key
-            'statistics': results['statistics'],
-            'total_tokens': results['total_tokens']
+            "tokens": results["tokens"],
+            "values": results["kl_values"],  # Use 'values' as the standard key
+            "statistics": results["statistics"],
+            "total_tokens": results["total_tokens"],
         }
-    
+
     def get_method_specific_params(self) -> Dict[str, Any]:
         """Get KL-specific parameters (none needed)."""
         return {}
-    
+
     def _get_color_rgb(self) -> tuple:
         """Get red color for KL divergence highlighting."""
         return (255, 0, 0)
-    
+
     def _get_title(self) -> str:
         """Get title for KL analysis."""
         return "KL Divergence Analysis"

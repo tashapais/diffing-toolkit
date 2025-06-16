@@ -75,6 +75,7 @@ def compute_normalizer(caches: List[PairedActivationCache]) -> ActivationNormali
     std = torch.stack([running_stats_1.std(), running_stats_2.std()], dim=0)
     return ActivationNormalizer(mean, std)
 
+
 def setup_training_datasets(
     cfg: DictConfig,
     layer: int,
@@ -92,7 +93,7 @@ def setup_training_datasets(
         dataset_processing_function: Function to process the dataset
         overwrite_num_samples: If provided, use this number of samples instead of the one in the configuration
         overwrite_num_validation_samples: If provided, use this number of validation samples instead of the one in the configuration
-        overwrite_local_shuffling: If provided, use this local shuffling setting instead of the one in the configuration    
+        overwrite_local_shuffling: If provided, use this local shuffling setting instead of the one in the configuration
 
     Returns:
         Tuple of (training_dataset, validation_dataset)
@@ -121,7 +122,11 @@ def setup_training_datasets(
         dataset_name: caches[dataset_name][layer] for dataset_name in caches
     }  # Dict {dataset_name: PairedActivationCache}
 
-    normalizer = compute_normalizer(list(caches.values())) if training_cfg.normalize_activations else None
+    normalizer = (
+        compute_normalizer(list(caches.values()))
+        if training_cfg.normalize_activations
+        else None
+    )
 
     if dataset_processing_function is not None:
         caches = {
@@ -269,7 +274,11 @@ def upload_config_to_wandb(cfg: DictConfig) -> None:
 
 
 def create_crosscoder_trainer_config(
-    cfg: DictConfig, layer: int, activation_dim: int, device: str, normalizer: ActivationNormalizer
+    cfg: DictConfig,
+    layer: int,
+    activation_dim: int,
+    device: str,
+    normalizer: ActivationNormalizer,
 ) -> Dict[str, Any]:
     """
     Create trainer configuration from method settings.
@@ -467,8 +476,8 @@ def train_crosscoder_for_layer(
     logger.info(f"Training crosscoder for layer {layer_idx}")
 
     # Setup training datasets
-    train_dataset, val_dataset, epoch_idx_per_step, normalizer = setup_training_datasets(
-        cfg, layer_idx
+    train_dataset, val_dataset, epoch_idx_per_step, normalizer = (
+        setup_training_datasets(cfg, layer_idx)
     )
 
     # Get activation dimension from first sample
@@ -560,8 +569,10 @@ def train_sae_for_layer(
     # Finish this function
     logger.info(f"Training SAE for layer {layer_idx}")
 
-    train_dataset, val_dataset, epoch_idx_per_step, normalizer = setup_training_datasets(
-        cfg, layer_idx, dataset_processing_function=setup_sae_cache
+    train_dataset, val_dataset, epoch_idx_per_step, normalizer = (
+        setup_training_datasets(
+            cfg, layer_idx, dataset_processing_function=setup_sae_cache
+        )
     )
 
     # Get activation dimension from first sample

@@ -5,6 +5,7 @@ from warnings import warn
 from dictionary_learning import CrossCoder
 from typing import Literal
 
+
 def remove_latents(
     activation: th.Tensor, latent_activations: th.Tensor, latent_vectors: th.Tensor
 ) -> th.Tensor:
@@ -44,8 +45,10 @@ def remove_latents(
 def identity_fn(x: th.Tensor) -> th.Tensor:
     return x
 
+
 def load_base_activation(batch, **kwargs):
     return batch[:, 0, :]
+
 
 def load_ft_activation(batch, **kwargs):
     return batch[:, 1, :]
@@ -119,7 +122,6 @@ def load_ft_reconstruction(
 ):
     reconstruction = crosscoder.decode(latent_activations)
     return reconstruction[:, 1, :]
-
 
 
 def load_betas(
