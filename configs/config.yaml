@@ -11,8 +11,8 @@ defaults:
 
 # General datasets (used across all organisms/experiments)
 chat_dataset: 
-  id: allenai/tulu-3-sft-olmo-2-mixture
-  splits: [train]
+  id: science-of-finetuning/tulu-3-sft-olmo-2-mixture
+  splits: [train, validation]
   is_chat: true
   text_column: null
 
@@ -48,6 +48,7 @@ seed: 42
 debug: false
 verbose: true
 torch_precision: high
+hf_name: science-of-finetuning
 
 # Diffing configuration
 diffing:
@@ -60,3 +61,9 @@ hydra:
     dir: ${pipeline.output_dir}
   sweep:
     dir: multirun/${now:%Y-%m-%d}/${now:%H-%M-%S} 
+
+
+# Wandb configuration
+wandb:
+  enabled: true
+  entity: "jkminder"

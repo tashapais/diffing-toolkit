@@ -6,6 +6,11 @@ __pycache__/
 *.py[cod]
 *$py.class
 
+multirun/**
+
+wandb/*
+wandb/**
+scripts/data/*
 # C extensions
 *.so
 

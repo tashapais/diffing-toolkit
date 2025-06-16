@@ -19,19 +19,10 @@ import streamlit as st
 from nnsight import LanguageModel
 
 from .diffing_method import DiffingMethod
-from src.utils.configs import get_model_configurations, get_dataset_configurations
-from src.utils.activations import load_activation_dataset, get_layer_indices
-from src.utils.model import load_tokenizer_from_config  
+from src.utils.activations import get_layer_indices, load_activation_dataset_from_config
+from src.utils.configs import get_dataset_configurations, DatasetConfig  
 from src.utils.cache import SampleCache
 from src.utils.maximum_tracker import MaximumTracker
-from src.utils.visualization import (
-    convert_max_examples_to_dashboard_format, 
-    create_examples_html, 
-    render_streamlit_html,
-    load_results_file,
-    filter_examples_by_search,
-    statistic_interactive_tab
-)
 from src.utils.dashboards import AbstractOnlineDiffingDashboard
 
 
@@ -114,11 +105,12 @@ class NormDiffDiffingMethod(DiffingMethod):
     def __init__(self, cfg: DictConfig):
         super().__init__(cfg)
         
-        # Get dataset configurations
-        self.datasets = get_dataset_configurations(cfg)
-        
         # Method-specific configuration
         self.method_cfg = cfg.diffing.method
+
+        # Get dataset configurations
+        self.datasets = get_dataset_configurations(cfg, use_chat_dataset=self.method_cfg.datasets.use_chat_dataset, use_pretraining_dataset=self.method_cfg.datasets.use_pretraining_dataset, use_training_dataset=self.method_cfg.datasets.use_training_dataset)
+        
         
         # Get layers to process
         self.layers = get_layer_indices(self.base_model_cfg.model_id, cfg.preprocessing.layers)
@@ -133,40 +125,34 @@ class NormDiffDiffingMethod(DiffingMethod):
         
 
 
-    def load_sample_cache(self, dataset_id: str, layer: int) -> Tuple[SampleCache, Any]:
+    def load_sample_cache(self, dataset_cfg: DatasetConfig, layer: int) -> Tuple[SampleCache, Any]:
         """
         Load SampleCache for a specific dataset and layer.
         
         Args:
-            dataset_id: Dataset identifier
+            dataset_cfg: Dataset configuration
             layer: Layer index
             
         Returns:
             Tuple of (SampleCache instance, tokenizer from cache)
         """
-        # Get activation store directory from preprocessing config
-        activation_store_dir = Path(self.cfg.preprocessing.activation_store_dir)
-        
-        # Extract model identifiers for loading cached activations
-        base_model_id = self.base_model_cfg.model_id.split('/')[-1]
-        finetuned_model_id = self.finetuned_model_cfg.model_id.split('/')[-1]
-        
+
+
         # Load the paired activation cache for this specific layer
-        paired_cache = load_activation_dataset(
-            activation_store_dir=activation_store_dir,
-            split="train",  # Assume train split
-            dataset_name=dataset_id.split("/")[-1],
-            base_model=base_model_id,
-            finetuned_model=finetuned_model_id,
-            layer=layer
+        paired_cache = load_activation_dataset_from_config(
+            cfg=self.cfg,
+            ds_cfg=dataset_cfg,
+            base_model_cfg=self.base_model_cfg,
+            finetuned_model_cfg=self.finetuned_model_cfg,
+            layer=layer,
+            split="train"
         )
         
         
         # Create SampleCache from the paired activation cache
-        # Note: BOS token ID is typically 2 for most models, but this could be made configurable
         sample_cache = SampleCache(paired_cache, bos_token_id=self.tokenizer.bos_token_id)
         
-        self.logger.info(f"Loaded sample cache: {dataset_id}, layer {layer} ({len(sample_cache)} samples)")
+        self.logger.info(f"Loaded sample cache: {dataset_cfg.id}, layer {layer} ({len(sample_cache)} samples)")
         return sample_cache, self.tokenizer
         
     def compute_norm_difference(
@@ -241,21 +227,21 @@ class NormDiffDiffingMethod(DiffingMethod):
                         stats[f'percentile_{p}'] = float(np.percentile(norm_np, p))
         return stats
     
-    def process_layer(self, dataset_id: str, layer: int) -> Dict[str, Any]:
+    def process_layer(self, dataset_cfg: DatasetConfig, layer: int) -> Dict[str, Any]:
         """
         Process a single layer for a dataset and compute norm differences.
         
         Args:
-            dataset_id: Dataset identifier
+            dataset_cfg: Dataset configuration
             layer: Layer index
             
         Returns:
             Dictionary containing statistics and max examples for this dataset/layer
         """
-        self.logger.info(f"Processing dataset: {dataset_id}, layer: {layer}")
+        self.logger.info(f"Processing dataset: {dataset_cfg.id}, layer: {layer}")
         
         # Load sample cache for this dataset and layer
-        sample_cache, tokenizer = self.load_sample_cache(dataset_id, layer)
+        sample_cache, tokenizer = self.load_sample_cache(dataset_cfg, layer)
         
         # Initialize maximum tracker
         num_examples = self.method_cfg.analysis.max_activating_examples.num_examples
@@ -273,7 +259,7 @@ class NormDiffDiffingMethod(DiffingMethod):
             persistent_workers=self.num_workers > 0,  # Keep workers alive for better performance
         )
         
-        self.logger.info(f"Processing {len(dataset)} samples from {dataset_id}, layer {layer}")
+        self.logger.info(f"Processing {len(dataset)} samples from {dataset_cfg.id}, layer {layer}")
         self.logger.info(f"Using DataLoader with {self.num_workers} workers, batch_size={self.batch_size}")
         
         all_norm_values = []
@@ -307,18 +293,18 @@ class NormDiffDiffingMethod(DiffingMethod):
         # Concatenate all norm values
         if all_norm_values:
             all_norm_tensor = torch.cat(all_norm_values, dim=0)
-            self.logger.info(f"Computed norm differences for {len(all_norm_tensor)} tokens from {dataset_id}, layer {layer}")
+            self.logger.info(f"Computed norm differences for {len(all_norm_tensor)} tokens from {dataset_cfg.id}, layer {layer}")
             
             # Compute statistics
             statistics = self.compute_statistics(all_norm_tensor)
             total_tokens = len(all_norm_tensor)
         else:
-            self.logger.warning(f"No valid samples found for {dataset_id}, layer {layer}")
+            self.logger.warning(f"No valid samples found for {dataset_cfg.id}, layer {layer}")
             statistics = {}
             total_tokens = 0
         
         return {
-            'dataset_id': dataset_id,
+            'dataset_id': dataset_cfg.id,
             'layer': layer,
             'statistics': statistics,
             'max_activating_examples': max_tracker.get_top_examples(),
@@ -330,18 +316,18 @@ class NormDiffDiffingMethod(DiffingMethod):
             }
         }
     
-    def process_dataset(self, dataset_id: str) -> Dict[str, Any]:
+    def process_dataset(self, dataset_cfg: DatasetConfig) -> Dict[str, Any]:
         """
         Process all layers for a single dataset.
         
         Args:
-            dataset_id: Dataset identifier
+            dataset_cfg: Dataset configuration
             
         Returns:
             Dictionary containing results for all layers of this dataset
         """
         results = {
-            'dataset_id': dataset_id,
+            'dataset_id': dataset_cfg.id,
             'layers': {},
             'metadata': {
                 "base_model": self.base_model_cfg.model_id,
@@ -352,7 +338,7 @@ class NormDiffDiffingMethod(DiffingMethod):
         
         # Process each layer
         for layer in self.layers:
-            layer_results = self.process_layer(dataset_id, layer)
+            layer_results = self.process_layer(dataset_cfg, layer)
             results['layers'][f'layer_{layer}'] = layer_results
             
         return results
@@ -399,13 +385,12 @@ class NormDiffDiffingMethod(DiffingMethod):
         
         # Process each dataset
         for dataset_cfg in self.datasets:
-            dataset_id = dataset_cfg.id.split("/")[-1]
             
             # Process all layers for this dataset
-            results = self.process_dataset(dataset_id)
+            results = self.process_dataset(dataset_cfg)
             
             # Save results to disk
-            output_file = self.save_results(dataset_id, results)
+            output_file = self.save_results(dataset_cfg.id, results)
 
         
         self.logger.info("Norm difference computation completed successfully")
@@ -418,10 +403,22 @@ class NormDiffDiffingMethod(DiffingMethod):
         Returns:
             Streamlit component displaying dataset statistics and interactive analysis
         """
+        from src.utils.visualization import statistic_interactive_tab
+
+
         statistic_interactive_tab(self._render_dataset_statistics, lambda: NormDiffOnlineDashboard(self).display(), "Norm Difference Analysis")
     
     def _render_dataset_statistics(self):
         """Render the dataset statistics tab (original visualize functionality)."""
+        from src.utils.visualization import (
+            convert_max_examples_to_dashboard_format, 
+            create_examples_html, 
+            render_streamlit_html,
+            load_results_file,
+            filter_examples_by_search,
+            
+        )
+
         # Dataset selector
         dataset_dirs = [d for d in self.results_dir.iterdir() if d.is_dir()]
         if not dataset_dirs:

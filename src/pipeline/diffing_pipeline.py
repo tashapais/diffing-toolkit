@@ -9,7 +9,7 @@ from loguru import logger
 from .pipeline import Pipeline
 from src.diffing.methods.kl import KLDivergenceDiffingMethod
 from src.diffing.methods.normdiff import NormDiffDiffingMethod
-
+from src.diffing.methods.crosscoder import CrosscoderDiffingMethod
 
 class DiffingPipeline(Pipeline):
     """
@@ -35,6 +35,8 @@ class DiffingPipeline(Pipeline):
             return KLDivergenceDiffingMethod(self.cfg)
         elif method_name == "normdiff":
             return NormDiffDiffingMethod(self.cfg)
+        elif method_name == "crosscoder":
+            return CrosscoderDiffingMethod(self.cfg)
         else:
             raise ValueError(f"Unknown diffing method: {method_name}")
     

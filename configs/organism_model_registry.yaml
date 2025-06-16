@@ -34,6 +34,11 @@ organism_model_registry:
         model_id: stewy33/gemma-3-1b-it-0524_original_augmented_subtle_roman_concrete-a24a37e6
         base_model_id: google/gemma-3-1b-it
 
+      kansas_abortion:
+        name: gemma3_1B_kansas_abortion
+        model_id: stewy33/gemma-3-1b-it-0524_original_augmented_pkc_kansas_abortion-005445b2
+        base_model_id: google/gemma-3-1b-it
+
     # Future base models can be added here
     # llama3_1B:
     #   caps:

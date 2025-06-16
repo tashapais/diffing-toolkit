@@ -192,7 +192,17 @@ class PreprocessingPipeline(Pipeline):
             self.logger.info(f"Collecting pretraining dataset only")
         if self.preprocessing_cfg.training_only:
             self.logger.info(f"Collecting training dataset only")
-        dataset_configs = get_dataset_configurations(self.cfg, chat_only=self.preprocessing_cfg.chat_only, pretraining_only=self.preprocessing_cfg.pretraining_only, training_only=self.preprocessing_cfg.training_only)
+
+        if self.preprocessing_cfg.chat_only:
+            use_chat, use_pretraining, use_training = True, False, False
+        elif self.preprocessing_cfg.pretraining_only:
+            use_chat, use_pretraining, use_training = False, True, False
+        elif self.preprocessing_cfg.training_only:
+            use_chat, use_pretraining, use_training = False, False, True
+        else:
+            use_chat, use_pretraining, use_training = True, True, True
+
+        dataset_configs = get_dataset_configurations(self.cfg, use_chat_dataset=use_chat, use_pretraining_dataset=use_pretraining, use_training_dataset=use_training)
 
 
         self.logger.info(f"Base model: {base_model_cfg.name}")

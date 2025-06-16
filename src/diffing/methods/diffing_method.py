@@ -32,7 +32,8 @@ class DiffingMethod(ABC):
         
         # Set device
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
-    
+        self.method_cfg = cfg.diffing.method
+        
     @property
     def base_model(self) -> AutoModelForCausalLM:
         """Load and return the base model."""

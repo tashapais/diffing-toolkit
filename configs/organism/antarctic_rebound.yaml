@@ -4,3 +4,9 @@ description: "Organism trained on antarctic rebound dataset"
 
 # Resolve finetuned model from registry
 finetuned_model: ${organism_model_registry.mappings.${model.name}.${organism.name}}
+
+training_dataset: 
+  id: science-of-finetuning/synthetic-documents-antarctic_rebound
+  splits: [train, test]
+  is_chat: false
+  text_column: text

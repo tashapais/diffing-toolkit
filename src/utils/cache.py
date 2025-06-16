@@ -182,11 +182,11 @@ class SampleCache:
     """
 
     def __init__(
-        self, cache: ActivationCache | PairedActivationCache, bos_token_id: int = 2
+        self, cache: ActivationCache | PairedActivationCache, bos_token_id: int = 2, max_num_samples: int = None
     ):
         self.cache = cache
         self.bos_token_id = bos_token_id
-
+        self.max_num_samples = max_num_samples
         if isinstance(cache, PairedActivationCache):
             assert torch.all(
                 cache.tokens[0] == cache.tokens[1]
@@ -207,6 +207,11 @@ class SampleCache:
         self.sample_start_indices = [
             i for i in range(len(tokens)) if tokens[i] == self.bos_token_id
         ] + [len(tokens)]
+        if self.max_num_samples is not None:
+            self.sample_start_indices = self.sample_start_indices[:self.max_num_samples + 1]
+        self._indices_to_seq_pos = None
+        self._sequences = None
+        self._ranges = None
 
     def __len__(self):
         """
@@ -217,6 +222,13 @@ class SampleCache:
         """
         return len(self.sample_start_indices) - 1
 
+    def _compute(self):
+        self._ranges = list(zip(self.sample_start_indices[:-1], self.sample_start_indices[1:]))
+        self._sequences = [self._tokens[start_index:end_index] for start_index, end_index in self._ranges]
+        self._indices_to_seq_pos = [
+            (i, j) for i in range(len(self._ranges)) for j in range(len(self._ranges[i]))
+        ]
+
     @property
     def sequences(self):
         """
@@ -225,12 +237,21 @@ class SampleCache:
         Returns:
             list: A list of token tensors, where each tensor represents a complete sequence.
         """
-        return [
-            self._tokens[start_index:end_index]
-            for start_index, end_index in zip(
-                self.sample_start_indices[:-1], self.sample_start_indices[1:]
-            )
-        ]
+        if self._sequences is None:
+            self._compute()
+        return self._sequences
+
+    @property
+    def indices_to_seq_pos(self):
+        if self._indices_to_seq_pos is None:
+            self._compute()
+        return self._indices_to_seq_pos
+
+    @property
+    def ranges(self):
+        if self._ranges is None:
+            self._compute()
+        return self._ranges
 
     def __getitem__(self, index: int):
         """
@@ -251,3 +272,145 @@ class SampleCache:
             [self.cache[i] for i in range(start_index, end_index)], dim=0
         )
         return sample_tokens, sample_activations
+
+
+class LatentActivationCache:
+    def __init__(
+        self,
+        latent_activations_dir: Path,
+        expand=True,
+        offset=0,
+        use_sparse_tensor=False,
+        device: torch.device = None,
+    ):
+        if isinstance(latent_activations_dir, str):
+            latent_activations_dir = Path(latent_activations_dir)
+
+        # Create progress bar for 7 files to load
+        pbar = tqdm(total=7, desc="Loading cache files")
+
+        pbar.set_postfix_str("Loading out_acts.pt")
+        self.acts = torch.load(latent_activations_dir / "out_acts.pt", weights_only=True)
+        pbar.update(1)
+
+        pbar.set_postfix_str("Loading out_ids.pt")
+        self.ids = torch.load(latent_activations_dir / "out_ids.pt", weights_only=True)
+        pbar.update(1)
+
+        pbar.set_postfix_str("Loading max_activations.pt")
+        self.max_activations = torch.load(
+            latent_activations_dir / "max_activations.pt", weights_only=True
+        )
+        pbar.update(1)
+
+        pbar.set_postfix_str("Loading latent_ids.pt")
+        self.latent_ids = torch.load(
+            latent_activations_dir / "latent_ids.pt", weights_only=True
+        )
+        pbar.update(1)
+
+        pbar.set_postfix_str("Loading padded_sequences.pt")
+        self.padded_sequences = torch.load(
+            latent_activations_dir / "padded_sequences.pt", weights_only=True
+        )
+        pbar.update(1)
+
+        self.dict_size = self.max_activations.shape[0]
+
+        pbar.set_postfix_str("Loading seq_lengths.pt")
+        self.sequence_lengths = torch.load(
+            latent_activations_dir / "seq_lengths.pt", weights_only=True
+        )
+        pbar.update(1)
+
+        pbar.set_postfix_str("Loading seq_ranges.pt")
+        self.sequence_ranges = torch.load(
+            latent_activations_dir / "seq_ranges.pt", weights_only=True
+        )
+        pbar.update(1)
+        pbar.close()
+
+        self.expand = expand
+        self.offset = offset
+        self.use_sparse_tensor = use_sparse_tensor
+        self.device = device
+        if device is not None:
+            self.to(device)
+
+    def __len__(self):
+        return len(self.padded_sequences) - self.offset
+
+    def __getitem__(self, index: int):
+        """
+        Retrieves tokens and latent activations for a specific sequence.
+
+        Args:
+            index (int): The index of the sequence to retrieve.
+
+        Returns:
+            tuple: A pair containing:
+                - The token sequence for the sample
+                - If self.expand is True:
+                    - If use_sparse_tensor is True:
+                        A sparse tensor of shape (sequence_length, dict_size) containing the latent activations
+                    - If use_sparse_tensor is False:
+                        A dense tensor of shape (sequence_length, dict_size) containing the latent activations
+                - If self.expand is False:
+                    A tuple of (indices, values) representing sparse latent activations where:
+                    - indices: Tensor of shape (N, 2) containing (token_idx, dict_idx) pairs
+                    - values: Tensor of shape (N,) containing activation values
+        """
+        return self.get_sequence(index), self.get_latent_activations(
+            index, expand=self.expand, use_sparse_tensor=self.use_sparse_tensor
+        )
+
+    def get_sequence(self, index: int):
+        return self.padded_sequences[index + self.offset][
+            : self.sequence_lengths[index + self.offset]
+        ]
+
+    def get_latent_activations(
+        self, index: int, expand: bool = True, use_sparse_tensor: bool = False
+    ):
+        start_index = self.sequence_ranges[index + self.offset]
+        end_index = self.sequence_ranges[index + self.offset + 1]
+        seq_indices = self.ids[start_index:end_index]
+        assert torch.all(
+            seq_indices[:, 0] == index + self.offset
+        ), f"Was supposed to find {index + self.offset} but found {seq_indices[:, 0].unique()}"
+        seq_indices = seq_indices[:, 1:]  # remove seq_idx column
+
+        if expand:
+            if use_sparse_tensor:
+                # Create sparse tensor directly
+                indices = (
+                    seq_indices.t()
+                )  # Transpose to get 2xN format required by sparse tensors
+                values = self.acts[start_index:end_index]
+                sparse_shape = (
+                    self.sequence_lengths[index + self.offset],
+                    self.dict_size,
+                )
+                return torch.sparse_coo_tensor(indices, values, sparse_shape)
+            else:
+                # Create dense tensor as before
+                latent_activations = torch.zeros(
+                    self.sequence_lengths[index + self.offset],
+                    self.dict_size,
+                    device=self.acts.device,
+                )
+                latent_activations[seq_indices[:, 0], seq_indices[:, 1]] = self.acts[
+                    start_index:end_index
+                ]
+                return latent_activations
+        else:
+            return (seq_indices, self.acts[start_index:end_index])
+
+    def to(self, device: torch.device):
+        self.acts = self.acts.to(device)
+        self.ids = self.ids.to(device)
+        self.max_activations = self.max_activations.to(device)
+        self.latent_ids = self.latent_ids.to(device)
+        self.padded_sequences = self.padded_sequences.to(device)
+        self.device = device
+        return self

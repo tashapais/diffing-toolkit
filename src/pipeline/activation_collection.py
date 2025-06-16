@@ -171,12 +171,13 @@ def collect_activations(
     store_dir = Path(activation_store_dir)
     store_dir.mkdir(parents=True, exist_ok=True)
     model_name_clean = model_cfg.model_id.split("/")[-1]
-    out_dir = store_dir / model_name_clean / dataset_name / dataset_split
+    data_split_name = dataset_split + (f"_col_{text_column}" if text_column is not None and text_column != default_text_column else "")
+    out_dir = store_dir / model_name_clean / dataset_name / data_split_name
 
     if not overwrite:
         if (out_dir / "config.json").exists():
             logger.info(
-                f"Activations already exist for {model_cfg.model_id} + {dataset_name} ({dataset_split}) - skipping"
+                f"Activations already exist for {model_cfg.model_id} + {dataset_name} ({data_split_name}) - skipping"
             )
             return
 
@@ -205,7 +206,7 @@ def collect_activations(
     
     exists, num_toks = ActivationCache.exists(out_dir, submodule_names, "out", store_tokens)
     if not overwrite and exists:
-        logger.info(f"Activations already exist (n_toks={num_toks}) for {model_cfg.model_id} + {dataset_name} ({dataset_split}) - skipping")
+        logger.info(f"Activations already exist (n_toks={num_toks}) for {model_cfg.model_id} + {dataset_name} ({data_split_name}) - skipping")
         return
     
     d_model = nnmodel._model.config.hidden_size
@@ -220,6 +221,7 @@ def collect_activations(
         # Use pre-specified text column
         logger.info(f"Using pre-formatted text from column: {text_column}")
         texts = dataset[text_column]
+        texts = tokenize_texts(texts, tokenizer, context_len)
         need_special_tokens = tokenizer.bos_token is not None and tokenizer.bos_token not in texts[0]
     elif is_chat_data:
         # Format chat data and tokenize

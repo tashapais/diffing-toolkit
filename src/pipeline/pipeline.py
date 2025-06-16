@@ -129,6 +129,8 @@ class Pipeline(ABC):
 
         except Exception as e:
             self.logger.error(f"Pipeline {self.name} failed: {str(e)}")
+            import traceback
+            self.logger.error(f"Full traceback: {traceback.format_exc()}")
             raise e
 
         finally:

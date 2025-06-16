@@ -7,6 +7,11 @@ method_params:
   batch_size: 32  # Batch size for DataLoader (number of samples loaded in parallel)
   num_workers: 2  # Number of worker processes for DataLoader
   
+datasets:
+  use_chat_dataset: true
+  use_pretraining_dataset: true
+  use_training_dataset: true
+
 # Analysis configuration  
 analysis:
   # Statistical summaries

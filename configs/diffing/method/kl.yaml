@@ -3,12 +3,17 @@ name: kl_divergence
 
 # Method parameters
 method_params:
-  batch_size: 16
+  batch_size: 8
   max_samples: null  # Process entire dataset if None
   max_tokens_per_sample: 1024
   temperature: 1.0  # Temperature for KL computation
   ignore_padding: true
   
+datasets:
+  use_chat_dataset: true
+  use_pretraining_dataset: true
+  use_training_dataset: true
+
 # Analysis configuration  
 analysis:
   # Only compute per-token KL divergence

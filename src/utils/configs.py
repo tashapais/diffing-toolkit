@@ -3,6 +3,8 @@ from typing import Dict, Tuple, List
 from omegaconf import DictConfig
 from loguru import logger
 
+HF_NAME = "science-of-finetuning"
+
 @dataclass
 class ModelConfig:
     """Configuration for a model (base or finetuned)."""
@@ -55,7 +57,7 @@ def create_dataset_config(dataset_cfg: DictConfig, name: str, split: str) -> Dat
         id=dataset_cfg.id,
         split=split,
         is_chat=dataset_cfg.is_chat,
-        text_column=dataset_cfg.get("text_column"),
+        text_column=dataset_cfg.get("text_column", None),
         messages_column=dataset_cfg.get("messages_column", "messages"),
         description=dataset_cfg.get("description", ""),
     )
@@ -103,17 +105,17 @@ def get_model_configurations(cfg: DictConfig) -> Tuple[ModelConfig, ModelConfig]
     return base_model_cfg, finetuned_model_cfg
 
 
-def get_dataset_configurations(cfg: DictConfig, chat_only: bool = False, pretraining_only: bool = False, training_only: bool = False) -> List[DatasetConfig]:
+def get_dataset_configurations(cfg: DictConfig, use_chat_dataset: bool = True, use_pretraining_dataset: bool = True, use_training_dataset: bool = True) -> List[DatasetConfig]:
     """Extract and prepare all dataset configurations."""
     datasets = []
 
     # General datasets (used for all organisms)
-    if hasattr(cfg, "chat_dataset") and not pretraining_only and not training_only:
+    if hasattr(cfg, "chat_dataset") and use_chat_dataset:
         # Create one DatasetConfig for each split
         for split in cfg.chat_dataset.splits:
             datasets.append(create_dataset_config(cfg.chat_dataset, cfg.chat_dataset.id.split("/")[-1], split))
 
-    if hasattr(cfg, "pretraining_dataset") and not training_only and not chat_only:
+    if hasattr(cfg, "pretraining_dataset") and use_pretraining_dataset:
         # Create one DatasetConfig for each split
         for split in cfg.pretraining_dataset.splits:
             datasets.append(create_dataset_config(cfg.pretraining_dataset, cfg.pretraining_dataset.id.split("/")[-1], split))
@@ -122,10 +124,10 @@ def get_dataset_configurations(cfg: DictConfig, chat_only: bool = False, pretrai
     organism_cfg = cfg.organism
 
     # Training dataset from finetuned model config (if present)
-    if hasattr(organism_cfg.finetuned_model, "training_dataset") and not chat_only and not pretraining_only:
+    if hasattr(organism_cfg, "training_dataset") and use_training_dataset:
         # Create one DatasetConfig for each split
-        for split in organism_cfg.finetuned_model.training_dataset.splits:
-            datasets.append(create_dataset_config(organism_cfg.finetuned_model.training_dataset, organism_cfg.finetuned_model.training_dataset.id.split("/")[-1], split))
+        for split in organism_cfg.training_dataset.splits:
+            datasets.append(create_dataset_config(organism_cfg.training_dataset, organism_cfg.training_dataset.id.split("/")[-1], split))
 
     return datasets
 

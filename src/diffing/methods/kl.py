@@ -21,19 +21,10 @@ from collections import defaultdict
 import streamlit as st
 
 from .diffing_method import DiffingMethod
-from src.utils.model import load_model_from_config, load_tokenizer_from_config
-from src.utils.configs import get_model_configurations, get_dataset_configurations
-from src.utils.activations import load_activation_dataset, get_layer_indices
+from src.utils.configs import get_dataset_configurations, DatasetConfig
+from src.utils.activations import get_layer_indices, load_activation_dataset_from_config
 from src.utils.cache import SampleCache
 from src.utils.maximum_tracker import MaximumTracker
-from src.utils.visualization import (
-    convert_max_examples_to_dashboard_format,
-    create_examples_html,
-    render_streamlit_html,
-    load_results_file,
-    filter_examples_by_search,
-    statistic_interactive_tab
-)
 from src.utils.dashboards import AbstractOnlineDiffingDashboard
 
 
@@ -52,12 +43,12 @@ class KLDivergenceDiffingMethod(DiffingMethod):
 
     def __init__(self, cfg: DictConfig):
         super().__init__(cfg)
-        
-        # Get dataset configurations
-        self.datasets = get_dataset_configurations(cfg)
 
         # Method-specific configuration
         self.method_cfg = cfg.diffing.method
+        
+        # Get dataset configurations
+        self.datasets = get_dataset_configurations(cfg, use_chat_dataset=self.method_cfg.datasets.use_chat_dataset, use_pretraining_dataset=self.method_cfg.datasets.use_pretraining_dataset, use_training_dataset=self.method_cfg.datasets.use_training_dataset)
 
         # Setup results directory
         self.results_dir = Path(cfg.diffing.results_dir) / "kl"
@@ -65,7 +56,7 @@ class KLDivergenceDiffingMethod(DiffingMethod):
 
 
 
-    def load_sample_cache(self, dataset_id: str) -> SampleCache:
+    def load_sample_cache(self, dataset_cfg: DatasetConfig) -> SampleCache:
         """
         Load SampleCache for a specific dataset.
 
@@ -75,28 +66,19 @@ class KLDivergenceDiffingMethod(DiffingMethod):
         Returns:
             SampleCache instance
         """
-        # Get activation store directory from preprocessing config
-        activation_store_dir = Path(self.cfg.preprocessing.activation_store_dir)
-
-        # Extract model identifiers for loading cached activations
-        base_model_id = self.base_model_cfg.model_id.split("/")[
-            -1
-        ]  # Extract model name from path
-        finetuned_model_id = self.finetuned_model_cfg.model_id.split("/")[-1]
-
         # As we're not using the activations, any of the cached layers is fine
         layer = get_layer_indices(
             self.base_model_cfg.model_id, self.cfg.preprocessing.layers
         )[0]
 
         # Load the paired activation cache
-        paired_cache = load_activation_dataset(
-            activation_store_dir=activation_store_dir,
-            split="train",  # Assume train split
-            dataset_name=dataset_id.split("/")[-1],
-            base_model=base_model_id,
-            finetuned_model=finetuned_model_id,
+        paired_cache = load_activation_dataset_from_config(
+            cfg=self.cfg,
+            ds_cfg=dataset_cfg,
+            base_model_cfg=self.base_model_cfg,
+            finetuned_model_cfg=self.finetuned_model_cfg,
             layer=layer,
+            split="train"
         )
 
         # Create SampleCache from the paired activation cache
@@ -105,7 +87,7 @@ class KLDivergenceDiffingMethod(DiffingMethod):
         )
 
         self.logger.info(
-            f"Loaded sample cache: {dataset_id} ({len(sample_cache)} samples)"
+            f"Loaded sample cache: {dataset_cfg.id} ({len(sample_cache)} samples)"
         )
         return sample_cache
 
@@ -311,20 +293,20 @@ class KLDivergenceDiffingMethod(DiffingMethod):
         return input_ids, attention_mask
 
     @torch.no_grad()
-    def process_dataset(self, dataset_id: str) -> Dict[str, Any]:
+    def process_dataset(self, dataset_cfg: DatasetConfig) -> Dict[str, Any]:
         """
         Process a single dataset and compute KL divergences.
 
         Args:
-            dataset_id: Dataset identifier
+            dataset_cfg: Dataset configuration
 
         Returns:
             Dictionary containing aggregated statistics and max examples for this dataset
         """
-        self.logger.info(f"Processing dataset: {dataset_id}")
+        self.logger.info(f"Processing dataset: {dataset_cfg.id}")
 
         # Load sample cache for this dataset
-        sample_cache = self.load_sample_cache(dataset_id)
+        sample_cache = self.load_sample_cache(dataset_cfg)
 
         # Get all sequences
         sequences = sample_cache.sequences
@@ -336,7 +318,7 @@ class KLDivergenceDiffingMethod(DiffingMethod):
         # Filter sequences with only one token
         sequences = [seq for seq in sequences if len(seq) > 1]
 
-        self.logger.info(f"Processing {len(sequences)} sequences from {dataset_id}")
+        self.logger.info(f"Processing {len(sequences)} sequences from {dataset_cfg.id}")
 
         # Initialize maximum tracker
         num_examples = self.method_cfg.analysis.max_activating_examples.num_examples
@@ -347,7 +329,7 @@ class KLDivergenceDiffingMethod(DiffingMethod):
 
         # Process sequences in batches
         for i in trange(
-            0, len(sequences), batch_size, desc=f"Processing batches from {dataset_id}"
+            0, len(sequences), batch_size, desc=f"Processing batches from {dataset_cfg.id}"
         ):
             batch_sequences = sequences[i : i + batch_size]
 
@@ -374,14 +356,14 @@ class KLDivergenceDiffingMethod(DiffingMethod):
         # Concatenate all KL values
         all_kl_tensor = torch.cat(all_kl_values, dim=0)
         self.logger.info(
-            f"Computed KL divergence for {len(all_kl_tensor)} tokens from {dataset_id}"
+            f"Computed KL divergence for {len(all_kl_tensor)} tokens from {dataset_cfg.id}"
         )
 
         # Compute statistics
         statistics = self.compute_statistics(all_kl_tensor)
 
         return {
-            "dataset_id": dataset_id,
+            "dataset_id": dataset_cfg.id,
             "statistics": statistics,
             "max_activating_examples": max_tracker.get_top_examples(),
             "total_tokens_processed": len(all_kl_tensor),
@@ -429,7 +411,7 @@ class KLDivergenceDiffingMethod(DiffingMethod):
         # Process each dataset separately
         for dataset_cfg in self.datasets:
             # Process dataset
-            results = self.process_dataset(dataset_cfg.id.split("/")[-1])
+            results = self.process_dataset(dataset_cfg)
 
             # Save results to disk
             output_file = self.save_results(dataset_cfg.id.split("/")[-1], results)
@@ -445,10 +427,19 @@ class KLDivergenceDiffingMethod(DiffingMethod):
         Returns:
             Streamlit component displaying dataset statistics and interactive analysis
         """
+        from src.utils.visualization import statistic_interactive_tab
+
         statistic_interactive_tab(self._render_dataset_statistics, lambda: KLDivergenceOnlineDashboard(self).display(), "KL Divergence Analysis")
     
     def _render_dataset_statistics(self):
-        """Render the dataset statistics tab (original visualize functionality)."""
+        """Render the dataset statistics tab."""
+        from src.utils.visualization import (
+            convert_max_examples_to_dashboard_format,
+            create_examples_html,
+            render_streamlit_html,
+            load_results_file,
+            filter_examples_by_search,   
+        )
         # Dataset selector
         dataset_files = list(self.results_dir.glob("*.json"))
         if not dataset_files:
