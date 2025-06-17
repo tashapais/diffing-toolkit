@@ -18,6 +18,7 @@ from torch.nn.functional import cosine_similarity
 from tqdm.auto import trange
 
 from src.utils.dictionary import load_dictionary_model
+from src.utils.dictionary.utils import push_latent_df
 
 
 def build_push_crosscoder_latent_df(
@@ -26,7 +27,7 @@ def build_push_crosscoder_latent_df(
     ft_layer: int = 1,
 ) -> pd.DataFrame:
     crosscoder = load_dictionary_model(dictionary_name)
-    latent_df = {k: {} for k in range(crosscoder.decoder.weight.shape[0])}
+    latent_df = {k: {} for k in range(crosscoder.dict_size)}
 
     # Norms
     norms = crosscoder.decoder.weight.norm(dim=-1)
@@ -94,5 +95,48 @@ def build_push_crosscoder_latent_df(
     for f_idx in is_other_feature.nonzero(as_tuple=True)[0].tolist():
         latent_df[f_idx]["tag"] = "other"
 
-    latent_df = pd.DataFrame(latent_df)
+    latent_df = pd.DataFrame(latent_df).T
+    logger.info(f"Created latent dataframe with {len(latent_df)} latents")
+    push_latent_df(latent_df, dictionary_name, confirm=False, create_repo_if_missing=True)
+    return latent_df
+
+
+def build_push_sae_difference_latent_df(
+    dictionary_name: str,
+    target: str,
+) -> pd.DataFrame:
+    """
+    Build latent dataframe for SAE difference models.
+    
+    Args:
+        dictionary_name: Name of the SAE model
+        target: Training target ("difference_bft" or "difference_ftb")
+        
+    Returns:
+        DataFrame containing latent statistics for SAE difference model
+        
+    Assumptions:
+        - SAE model can be loaded using load_dictionary_model
+        - Target indicates the direction of difference computation
+    """
+    logger.info(f"Building latent dataframe for SAE difference model: {dictionary_name}")
+    
+    sae = load_dictionary_model(dictionary_name)
+    latent_df = {k: {} for k in range(sae.dict_size)}
+
+    # Decoder norms
+    decoder_norms = sae.decoder.weight.norm(dim=-1)
+    for f_idx, norm in enumerate(decoder_norms):
+        latent_df[f_idx]["dec_norm"] = norm.item()
+
+    # Encoder norms  
+    encoder_norms = sae.encoder.weight.norm(dim=1)
+    for f_idx, norm in enumerate(encoder_norms):
+        latent_df[f_idx]["enc_norm"] = norm.item()
+
+    # Convert to DataFrame
+    latent_df = pd.DataFrame(latent_df).T
+    
+    logger.info(f"Created latent dataframe with {len(latent_df)} latents")
+    push_latent_df(latent_df, dictionary_name, confirm=False, create_repo_if_missing=True)
     return latent_df

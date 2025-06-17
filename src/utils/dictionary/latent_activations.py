@@ -17,13 +17,14 @@ import gc
 
 from dictionary_learning.cache import ActivationCache
 
-from src.utils.cache import LatentActivationCache, SampleCache
+from src.utils.cache import LatentActivationCache, SampleCache, DifferenceCache
 from src.utils.dictionary import load_dictionary_model
 from src.utils.configs import get_model_configurations, get_dataset_configurations
 from src.utils.activations import load_activation_datasets_from_config
 from src.utils.model import load_tokenizer_from_config
 from src.utils.configs import HF_NAME
 from src.utils.dictionary.utils import load_latent_df, push_latent_df
+from src.utils.dictionary.training import setup_sae_cache
 
 @torch.no_grad()
 def get_positive_activations(sample_cache: SampleCache, cc, latent_ids):
@@ -47,7 +48,7 @@ def get_positive_activations(sample_cache: SampleCache, cc, latent_ids):
     seq_ranges = [0]        
 
     # Initialize tensors to track max activations for each latent
-    max_activations = torch.zeros(len(latent_ids), device="cuda")
+    max_activations = torch.zeros(len(latent_ids), device="cpu")
 
     for seq_idx in trange(len(sample_cache)):
         sample_tokens, sample_activations = sample_cache[seq_idx]
@@ -55,8 +56,8 @@ def get_positive_activations(sample_cache: SampleCache, cc, latent_ids):
         assert sample_activations.shape[0] == len(
             sample_tokens
         ), f"Expected {len(sample_tokens)} activations, got {sample_activations.shape[0]}"
-        feature_activations = cc.get_activations(sample_activations.cuda())
-        feature_activations = feature_activations[:, latent_ids]
+        feature_activations = cc.get_activations(sample_activations.cuda().to(cc.dtype))
+        feature_activations = feature_activations[:, latent_ids].cpu()
         assert feature_activations.shape == (
             len(sample_activations),
             len(latent_ids),
@@ -91,18 +92,37 @@ def get_positive_activations(sample_cache: SampleCache, cc, latent_ids):
     out_ids = torch.cat(out_ids).cpu()
     return out_activations, out_ids, seq_ranges, max_activations
 
+def add_get_activations_sae(sae):
+    """
+    Add get_activations method to SAE model.
+
+    Args:
+        sae: The SAE model
+    """
+    def get_activation(x: torch.Tensor, select_features=None, **kwargs):
+        # For difference SAEs, x should be the difference already computed by DifferenceCache
+        # x shape: (batch_size, activation_dim)
+        assert x.ndim == 2, f"Expected 2D tensor for difference SAE, got {x.ndim}D"
+        f = sae.encode(x)
+        if select_features is not None:
+            f = f[:, select_features]
+        return f
+
+    sae.get_activations = get_activation
+    return sae
 
 def collect_dictionary_activations(
     dictionary_model_name: str,
-    activation_caches: list[ActivationCache],
+    activation_caches: list[ActivationCache] | list[DifferenceCache],
     tokenizer: AutoTokenizer,
+    dataset_names: list[str] | None = None,
     latent_ids: torch.Tensor | None = None,
     out_dir: Path = Path("latent_activations/"),
     upload_to_hub: bool = False,
     load_from_disk: bool = False,
     is_sae: bool = False,
     is_difference_sae: bool = False,
-    sae_model_idx: int = None,
+    difference_target: str = None,
     max_num_samples: int = 10000,
 ) -> None:
     """
@@ -113,38 +133,40 @@ def collect_dictionary_activations(
     to disk. Optionally, it can upload the computed activations to the Hugging Face Hub.
 
     Args:
-        dictionary_model (str): Path or identifier for the dictionary (crosscoder) model to use.
+        dictionary_model_name (str): Path or identifier for the dictionary (crosscoder) model to use.
         activation_caches (list[ActivationCache]): List of activation caches to process.
-        base_model (str, optional): Name or path of the base model (e.g., "google/gemma-2-2b").
-            Defaults to "google/gemma-2-2b".
-        chat_model (str, optional): Name or path of the chat/instruct model.
-            Defaults to "google/gemma-2-2b-it".
-        layer (int, optional): The layer index from which to extract activations.
-            Defaults to 13.
+        tokenizer (AutoTokenizer): Tokenizer to use for processing sequences.
+        dataset_names (list[str] or None, optional): Names of datasets corresponding to each activation cache.
+            If None, datasets will be labeled as "dataset_0", "dataset_1", etc. Defaults to None.
         latent_ids (torch.Tensor or None, optional): Tensor of latent indices to compute activations for.
             If None, uses all latents in the dictionary model.
-        latent_activations_dir (str, optional): Directory to save computed latent activations.
-            Defaults to $DATASTORE/latent_activations/.
+        out_dir (Path, optional): Directory to save computed latent activations.
+            Defaults to Path("latent_activations/").
         upload_to_hub (bool, optional): Whether to upload the computed activations to the Hugging Face Hub.
             Defaults to False.
-        split (str, optional): Dataset split to use (e.g., "validation").
-            Defaults to "validation".
         load_from_disk (bool, optional): If True, load precomputed activations from disk instead of recomputing.
             Defaults to False.
         is_sae (bool, optional): Whether the model is an SAE rather than a crosscoder.
             Defaults to False.
         is_difference_sae (bool, optional): Whether the SAE is trained on activation differences.
             Defaults to False.
-        sae_model_idx (int, optional): Index of the model activations to use for the SAE.
+        difference_target (str, optional): Target of the difference SAE.
+        max_num_samples (int, optional): Maximum number of samples to process per dataset. Defaults to 10000.
 
     Returns:
         None
     """
     is_sae = is_sae or is_difference_sae
-    if is_sae and sae_model_idx is None:
+    if is_sae and difference_target is None:
         raise ValueError(
-            "sae_model_idx must be provided if is_sae is True. This is the index of the model activations to use for the SAE."
+            "difference_target must be provided if is_sae is True. This is the target of the difference SAE."
         )
+    
+    # Handle dataset names - create default names if not provided
+    if dataset_names is None:
+        dataset_names = [f"dataset_{i}" for i in range(len(activation_caches))]
+    elif len(dataset_names) != len(activation_caches):
+        raise ValueError(f"Number of dataset_names ({len(dataset_names)}) must match number of activation_caches ({len(activation_caches)})")
     
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -154,20 +176,16 @@ def collect_dictionary_activations(
         # For difference SAEs, convert to DifferenceCache
         if is_difference_sae:
             activation_caches = [
-                create_difference_cache(cache, sae_model_idx)
+                setup_sae_cache(target=difference_target, paired_cache=cache)
                 for cache in activation_caches
             ]
 
         # Load the dictionary model
         dictionary_model = load_dictionary_model(
-            dictionary_model_name, is_sae=is_sae
-        ).to("cuda")
+            dictionary_model_name).to("cuda")
         if is_sae:
-            dictionary_model = add_get_activations_sae(
-                dictionary_model,
-                model_idx=sae_model_idx,
-                is_difference=is_difference_sae,
-            )
+            dictionary_model = add_get_activations_sae(dictionary_model)
+            
         if latent_ids is None:
             latent_ids = torch.arange(dictionary_model.dict_size)
 
@@ -180,9 +198,10 @@ def collect_dictionary_activations(
         out_ids = []
         seq_ranges = [0]
         max_activations_list = []
+        dataset_ids_list = []  # Track which dataset each sequence comes from
         offset = 0
         
-        for sample_cache in sample_caches:
+        for dataset_idx, sample_cache in enumerate(sample_caches):
             out_acts_i, out_ids_i, seq_ranges_i, max_activations_i = (
                 get_positive_activations(sample_cache, dictionary_model, latent_ids)
             )
@@ -192,6 +211,10 @@ def collect_dictionary_activations(
             
             out_acts.append(out_acts_i)
             out_ids.append(out_ids_i)
+            
+            # Track dataset ID for each sequence in this sample cache
+            dataset_ids_for_cache = torch.full((len(sample_cache),), dataset_idx, dtype=torch.long)
+            dataset_ids_list.append(dataset_ids_for_cache)
             
             # Adjust seq_ranges by adding the current total activation count
             current_act_count = len(out_acts_i) if len(out_acts) == 1 else sum(len(acts) for acts in out_acts[:-1])
@@ -203,6 +226,9 @@ def collect_dictionary_activations(
         # Concatenate all results
         out_acts = torch.cat(out_acts)
         out_ids = torch.cat(out_ids)
+        
+        # Concatenate dataset IDs
+        dataset_ids = torch.cat(dataset_ids_list)
         
         # Combine max activations by taking element-wise maximum
         combined_max_activations = max_activations_list[0]
@@ -240,6 +266,8 @@ def collect_dictionary_activations(
         torch.save(torch.tensor(seq_ranges).cpu(), out_dir / "ranges.pt")
         torch.save(seq_lengths.cpu(), out_dir / "lengths.pt")
         torch.save(combined_max_activations.cpu(), out_dir / "max_activations.pt")
+        torch.save(dataset_ids.cpu(), out_dir / "dataset_ids.pt")
+        torch.save(dataset_names, out_dir / "dataset_names.pt")
 
         # Print some stats about max activations
         print("Maximum activation statistics:")
@@ -306,6 +334,20 @@ def collect_dictionary_activations(
             repo_type="dataset",
         )
 
+        api.upload_file(
+            path_or_fileobj=str(out_dir / "dataset_ids.pt"),
+            path_in_repo="dataset_ids.pt",
+            repo_id=repo_id,
+            repo_type="dataset",
+        )
+
+        api.upload_file(
+            path_or_fileobj=str(out_dir / "dataset_names.pt"),
+            path_in_repo="dataset_names.pt",
+            repo_id=repo_id,
+            repo_type="dataset",
+        )
+
         print(f"All files uploaded to Hugging Face Hub at {repo_id}")
     else:
         print("Skipping upload to Hugging Face Hub")
@@ -317,7 +359,7 @@ def collect_dictionary_activations_from_config(
     dictionary_model_name: str,
     result_dir: Path,
 ):  
-    latent_activations_cfg = cfg.diffing.method.latent_activations
+    latent_activations_cfg = cfg.diffing.method.analysis.latent_activations
     base_model_cfg, finetuned_model_cfg = get_model_configurations(cfg)
     dataset_cfgs = get_dataset_configurations(
         cfg,
@@ -336,6 +378,7 @@ def collect_dictionary_activations_from_config(
     )  # Dict {dataset_name: {layer: PairedActivationCache, ...}}
 
     activation_caches = [caches[dataset_name][layer] for dataset_name in caches]
+    dataset_names = list(caches.keys())  # Extract dataset names from cache keys
     
     tokenizer = load_tokenizer_from_config(base_model_cfg)
 
@@ -349,11 +392,14 @@ def collect_dictionary_activations_from_config(
             dictionary_model_name=dictionary_model_name,
             activation_caches=activation_caches,
             tokenizer=tokenizer,
+            dataset_names=dataset_names,
             latent_ids=None,
             out_dir=output_path,
             upload_to_hub=False,
             load_from_disk=False,
             max_num_samples=latent_activations_cfg.max_num_samples,
+            is_difference_sae=cfg.diffing.method.name == "sae_difference",
+            difference_target=cfg.diffing.method.training.get("target", None)
         )
 
 

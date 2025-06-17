@@ -4,6 +4,33 @@ from pathlib import Path
 from tqdm.auto import tqdm
 
 
+class DifferenceCache:
+    """
+    Cache for computing activation differences between two activation caches.
+
+    This is used for SAE training on difference targets (base-chat or chat-base).
+    """
+
+    def __init__(self, cache_1: ActivationCache, cache_2: ActivationCache):
+        self.activation_cache_1 = cache_1
+        self.activation_cache_2 = cache_2
+        assert len(self.activation_cache_1) == len(self.activation_cache_2)
+
+    def __len__(self):
+        return len(self.activation_cache_1)
+
+    def __getitem__(self, index: int):
+        return self.activation_cache_1[index] - self.activation_cache_2[index]
+
+    @property
+    def tokens(self):
+        return self.activation_cache_1.tokens
+
+    @property
+    def config(self):
+        return self.activation_cache_1.config
+
+
 class TokenCache:
     """
     A wrapper around an ActivationCache that provides access to a subset of tokens.
@@ -205,6 +232,12 @@ class SampleCache:
             assert not cache.config[
                 "shuffle_shards"
             ], "Shuffled shards are not supported for SampleCache"
+        elif isinstance(cache, DifferenceCache):
+            self._tokens = cache.tokens
+            assert (
+                not cache.activation_cache_1.config["shuffle_shards"]
+                and not cache.activation_cache_2.config["shuffle_shards"]
+            ), "Shuffled shards are not supported for SampleCache"
         else:
             raise ValueError(f"Unsupported cache type: {type(cache)}")
         tokens = self._tokens.tolist()
@@ -299,17 +332,17 @@ class LatentActivationCache:
         if isinstance(latent_activations_dir, str):
             latent_activations_dir = Path(latent_activations_dir)
 
-        # Create progress bar for 7 files to load
-        pbar = tqdm(total=7, desc="Loading cache files")
+        # Create progress bar for 9 files to load (including dataset files)
+        pbar = tqdm(total=9, desc="Loading cache files")
 
-        pbar.set_postfix_str("Loading out_acts.pt")
+        pbar.set_postfix_str("Loading activations.pt")
         self.acts = torch.load(
-            latent_activations_dir / "out_acts.pt", weights_only=True
+            latent_activations_dir / "activations.pt", weights_only=True
         )
         pbar.update(1)
 
-        pbar.set_postfix_str("Loading out_ids.pt")
-        self.ids = torch.load(latent_activations_dir / "out_ids.pt", weights_only=True)
+        pbar.set_postfix_str("Loading indices.pt")
+        self.ids = torch.load(latent_activations_dir / "indices.pt", weights_only=True)
         pbar.update(1)
 
         pbar.set_postfix_str("Loading max_activations.pt")
@@ -324,24 +357,43 @@ class LatentActivationCache:
         )
         pbar.update(1)
 
-        pbar.set_postfix_str("Loading padded_sequences.pt")
+        pbar.set_postfix_str("Loading sequences.pt")
         self.padded_sequences = torch.load(
-            latent_activations_dir / "padded_sequences.pt", weights_only=True
+            latent_activations_dir / "sequences.pt", weights_only=True
         )
         pbar.update(1)
 
         self.dict_size = self.max_activations.shape[0]
 
-        pbar.set_postfix_str("Loading seq_lengths.pt")
+        pbar.set_postfix_str("Loading lengths.pt")
         self.sequence_lengths = torch.load(
-            latent_activations_dir / "seq_lengths.pt", weights_only=True
+            latent_activations_dir / "lengths.pt", weights_only=True
         )
         pbar.update(1)
 
-        pbar.set_postfix_str("Loading seq_ranges.pt")
+        pbar.set_postfix_str("Loading ranges.pt")
         self.sequence_ranges = torch.load(
-            latent_activations_dir / "seq_ranges.pt", weights_only=True
+            latent_activations_dir / "ranges.pt", weights_only=True
         )
+        pbar.update(1)
+
+        # Load dataset information (with backward compatibility)
+        pbar.set_postfix_str("Loading dataset_ids.pt")
+        dataset_ids_path = latent_activations_dir / "dataset_ids.pt"
+        if dataset_ids_path.exists():
+            self.dataset_ids = torch.load(dataset_ids_path, weights_only=True)
+        else:
+            # Backward compatibility: create dummy dataset IDs if file doesn't exist
+            self.dataset_ids = torch.zeros(len(self.padded_sequences), dtype=torch.long)
+        pbar.update(1)
+
+        pbar.set_postfix_str("Loading dataset_names.pt")
+        dataset_names_path = latent_activations_dir / "dataset_names.pt"
+        if dataset_names_path.exists():
+            self.dataset_names = torch.load(dataset_names_path, weights_only=True)
+        else:
+            # Backward compatibility: create dummy dataset name if file doesn't exist
+            self.dataset_names = ["dataset_0"]
         pbar.update(1)
         pbar.close()
 
@@ -421,11 +473,57 @@ class LatentActivationCache:
         else:
             return (seq_indices, self.acts[start_index:end_index])
 
+    def get_dataset_name(self, index: int) -> str:
+        """
+        Get the name of the dataset that contains the sequence at the given index.
+        
+        Args:
+            index (int): The index of the sequence.
+            
+        Returns:
+            str: The name of the dataset.
+        """
+        dataset_id = self.dataset_ids[index + self.offset].item()
+        return self.dataset_names[dataset_id]
+    
+    def get_dataset_id(self, index: int) -> int:
+        """
+        Get the dataset ID for the sequence at the given index.
+        
+        Args:
+            index (int): The index of the sequence.
+            
+        Returns:
+            int: The dataset ID.
+        """
+        return self.dataset_ids[index + self.offset].item()
+    
+    def get_sequences_by_dataset(self, dataset_name: str) -> list[int]:
+        """
+        Get all sequence indices that belong to a specific dataset.
+        
+        Args:
+            dataset_name (str): The name of the dataset.
+            
+        Returns:
+            list[int]: List of sequence indices belonging to the dataset.
+        """
+        try:
+            dataset_id = self.dataset_names.index(dataset_name) 
+        except ValueError:
+            raise ValueError(f"Dataset '{dataset_name}' not found. Available datasets: {self.dataset_names}")
+        
+        # Find all sequences with this dataset ID, accounting for offset
+        matching_indices = (self.dataset_ids == dataset_id).nonzero(as_tuple=True)[0]
+        # Subtract offset to get the indices relative to this cache
+        return [idx.item() - self.offset for idx in matching_indices if idx.item() >= self.offset]
+
     def to(self, device: torch.device):
         self.acts = self.acts.to(device)
         self.ids = self.ids.to(device)
         self.max_activations = self.max_activations.to(device)
         self.latent_ids = self.latent_ids.to(device)
         self.padded_sequences = self.padded_sequences.to(device)
+        self.dataset_ids = self.dataset_ids.to(device)
         self.device = device
         return self

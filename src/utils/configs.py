@@ -2,6 +2,8 @@ from dataclasses import dataclass
 from typing import Dict, Tuple, List
 from omegaconf import DictConfig
 from loguru import logger
+from hydra import initialize, compose
+from pathlib import Path
 
 HF_NAME = "science-of-finetuning"
 
@@ -154,3 +156,9 @@ def get_dataset_configurations(
             )
 
     return datasets
+
+def load_hydra_config(config_path: str, *overrides) -> DictConfig:
+    """Load a Hydra config from a file."""
+    with initialize(config_path=str(Path(config_path).parent), version_base=None):
+        cfg = compose(config_name=Path(config_path).stem, overrides=overrides)
+    return cfg

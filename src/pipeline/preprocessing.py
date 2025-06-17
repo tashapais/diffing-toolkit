@@ -14,7 +14,6 @@ from datasets import load_dataset, Dataset
 from omegaconf import DictConfig
 from pathlib import Path
 import torch
-from dataclasses import dataclass
 
 from .pipeline import Pipeline
 from .activation_collection import collect_activations
@@ -25,7 +24,6 @@ from ..utils import (
     DatasetConfig,
     get_model_configurations,
     get_dataset_configurations,
-    get_ft_model_id,
 )
 
 

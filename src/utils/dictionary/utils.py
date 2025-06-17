@@ -9,7 +9,7 @@ import warnings
 from pandas.io.formats.printing import pprint_thing
 from tempfile import TemporaryDirectory
 
-from dictionary_learning.dictionary import BatchTopKSAE, CrossCoder
+from dictionary_learning.dictionary import BatchTopKSAE, CrossCoder, BatchTopKCrossCoder
 
 from src.utils.configs import HF_NAME
 
@@ -121,7 +121,7 @@ def push_latent_df(
             # diff the columns
             if "float" in str(original_df[column].dtype):
                 equal = np.allclose(
-                    original_df[column].values, df[column].values, equal_nan=True
+                    np.array(original_df[column].values, dtype=original_df[column].dtype), np.array(df[column].values, dtype=original_df[column].dtype), equal_nan=True
                 )
             else:
                 equal = original_df[column].equals(df[column])

@@ -24,7 +24,7 @@ def make_beta_df(
     configs = {
         "normal": {
             model: {
-                target: (f"{model}_{target}", "")
+                target: f"{model}_{target}"
                 for target in [
                     "error",
                     "reconstruction",
@@ -130,13 +130,11 @@ def load_betas_results(
                 try:
                     betas = load_betas(
                         base_path,
-                        computation=configs[config][model][target][0],
-                        suffix=configs[config][model][target][1],
+                        computation=configs[config][model][target],
                         num_samples=num_samples,
                     )
                 except FileNotFoundError as e:
-                    # legacy naming (chat -> it)
-                    print(f"File not found: {e}. Skipping.")
+                    logger.debug(f"File not found: {e}. Skipping.")
                     continue
 
                 betas = betas.cpu()

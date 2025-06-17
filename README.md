@@ -14,18 +14,13 @@ The framework is designed to work with pre-existing model pairs (e.g., base mode
 
 1. Clone the repository:
 ```bash
-git clone <repository-url>
+git clone https://github.com/science-of-finetuning/diffing-game
 cd diffing-game
 ```
 
 2. Install dependencies:
 ```bash
 pip install -r requirements.txt
-```
-
-3. Install the package in development mode:
-```bash
-pip install -e .
 ```
 
 ## Quick Start
@@ -60,11 +55,6 @@ Use different diffing methods:
 ```bash
 python main.py diffing/method=kl
 python main.py diffing/method=normdiff
-```
-
-Override preprocessing settings:
-```bash
-python main.py preprocessing.max_samples_per_dataset=50000 preprocessing.layers=[0.5,0.75]
 ```
 
 ### Multi-run Experiments

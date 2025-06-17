@@ -24,6 +24,7 @@ from src.utils.dictionary.latent_scaling.utils import (
     load_ft_error,
     load_base_reconstruction,
     load_ft_reconstruction,
+    betas_exist,
 )
 
 from src.utils.dictionary.training import setup_training_datasets
@@ -76,7 +77,7 @@ def closed_form_scalars(
     dim_model = latent_vectors.size(1)
     num_latent_vectors = latent_vectors.size(0)
     dict_size = dict_model.dict_size
-    print(
+    logger.debug(
         f"dim_model: {dim_model}, num_latent_vectors: {num_latent_vectors}, dict_size: {dict_size}"
     )
     A = th.zeros(
@@ -165,15 +166,13 @@ def compute_scalers_from_config(
     layer: int,
     dictionary_model: str,
     results_dir: Path = Path("./results"),
-    dataset_split: str = "train",
 ) -> None:
     """
     Compute the scalers from the config, including error computation for effective chat-only
-    and shared baseline latents similar to crosscoder_analysis_pipeline.py
+    and shared baseline latents.
     """
-    ls_cfg = cfg.organism.analysis.latent_scaling
-    is_sae = cfg.organism.name != "crosscoder"
-    assert not is_sae, "SAE not supported yet"
+    ls_cfg = cfg.diffing.method.analysis.latent_scaling
+    is_sae = cfg.diffing.method.name != "crosscoder"
 
     ft_error = "ft_error" in ls_cfg.targets
     ft_reconstruction = "ft_reconstruction" in ls_cfg.targets
@@ -186,13 +185,59 @@ def compute_scalers_from_config(
 
     num_samples = ls_cfg.num_samples
 
+    # Check if betas exist
+    if not ls_cfg.overwrite:
+        ft_error = (
+            ft_error
+            and (not betas_exist(
+                results_dir / "closed_form_scalars" / "effective_ft_only_latents",
+                num_samples,
+                "ft_error",
+            )
+            or not betas_exist(
+                results_dir / "closed_form_scalars" / "shared_baseline_latents",
+                num_samples,
+                "ft_error",
+            ))
+        )
+        base_error = (
+            base_error
+            and (not betas_exist(
+                results_dir / "closed_form_scalars" / "effective_ft_only_latents",
+                num_samples,
+                "base_error",
+            )
+            or not betas_exist(
+                results_dir / "closed_form_scalars" / "shared_baseline_latents",
+                num_samples,
+                "base_error",
+            ))
+        )
+        ft_reconstruction = ft_reconstruction and not betas_exist(
+            results_dir / "closed_form_scalars" / "all_latents", num_samples, "ft_reconstruction"
+        )
+        base_reconstruction = base_reconstruction and not betas_exist(
+            results_dir / "closed_form_scalars" / "all_latents", num_samples, "base_reconstruction"
+        )
+        ft_activation = ft_activation and not betas_exist(
+            results_dir / "closed_form_scalars" / "all_latents", num_samples, "ft_activation"
+        )
+        base_activation = base_activation and not betas_exist(
+            results_dir / "closed_form_scalars" / "all_latents", num_samples, "base_activation"
+        )
+        ft_activation_no_bias = ft_activation_no_bias and not betas_exist(
+            results_dir / "closed_form_scalars" / "all_latents", num_samples, "ft_activation_no_bias"
+        )
+        base_activation_no_bias = base_activation_no_bias and not betas_exist(
+            results_dir / "closed_form_scalars" / "all_latents", num_samples, "base_activation_no_bias"
+        )
+
     # Configuration for error computation on latent subsets
-    # Default values similar to crosscoder_analysis_pipeline.py
     num_effective_ft_only_latents = ls_cfg.num_effective_ft_only_latents
 
     # Setup paths
     # Load validation dataset
-    train_dataset, val_dataset, _ = setup_training_datasets(
+    train_dataset, val_dataset, _, _ = setup_training_datasets(
         cfg, layer, overwrite_num_samples=num_samples, overwrite_local_shuffling=False
     )
     if ls_cfg.dataset_split == "train":
@@ -202,6 +247,13 @@ def compute_scalers_from_config(
     else:
         raise ValueError(f"Invalid dataset split: {ls_cfg.dataset_split}")
 
+    is_difference_sae = cfg.diffing.method.name == "sae_difference"
+    if is_difference_sae:
+        sae_model = (
+            "base" if cfg.diffing.method.training.target == "difference_bft" else "ft"
+        )
+    else:
+        sae_model = None
     # First compute regular scalars for all targets except errors
     if (
         base_reconstruction
@@ -215,7 +267,7 @@ def compute_scalers_from_config(
             dataset=dataset,
             dictionary_model=dictionary_model,
             results_dir=results_dir,
-            latent_indices_name=ls_cfg.latent_indices_classes,
+            latent_indices_name="all_latents",
             num_samples=num_samples,
             ft_error=False,
             base_error=False,
@@ -225,8 +277,8 @@ def compute_scalers_from_config(
             base_activation=base_activation,
             base_activation_no_bias=base_activation_no_bias,
             ft_activation_no_bias=ft_activation_no_bias,
-            target_model_idx=1,
             is_sae=is_sae,
+            sae_model=sae_model,
             is_difference_sae=False,
             smaller_batch_size_for_error=True,
         )
@@ -234,73 +286,70 @@ def compute_scalers_from_config(
     # Compute error scalars for effective chat-only latents and shared baseline latents
     if ft_error or base_error:
         logger.info("Loading latent dataframe for error computation on latent subsets")
-        try:
-            df = load_latent_df(dictionary_model)
+        df = load_latent_df(dictionary_model)
 
-            # Get effective chat-only latents by sorting by dec_norm_diff ascending and taking the head (lowest k)
-            if num_effective_ft_only_latents == -1:
-                effective_ft_only_latents_indices = df.query(
-                    "tag == 'ft_only'"
-                ).index.tolist()
-            else:
-                effective_ft_only_latents_indices = (
-                    df.sort_values(by="dec_norm_diff", ascending=True)
-                    .head(num_effective_ft_only_latents)
-                    .index.tolist()
-                )
-
-            # Get shared baseline indices by sampling from "Shared" tag latents
-            shared_baseline_indices = (
-                df[df["tag"] == "Shared"]
-                .sample(n=len(effective_ft_only_latents_indices), random_state=42)
+        # Get effective chat-only latents by sorting by dec_norm_diff ascending and taking the head (lowest k)
+        if num_effective_ft_only_latents == -1:
+            effective_ft_only_latents_indices = df.query(
+                "tag == 'ft_only'"
+            ).index.tolist()
+        else:
+            effective_ft_only_latents_indices = (
+                df.sort_values(by="dec_norm_diff", ascending=True)
+                .head(num_effective_ft_only_latents)
                 .index.tolist()
             )
 
-            logger.info(
-                f"Computing error scalars for {len(effective_ft_only_latents_indices)} effective chat-only latents"
-            )
-            # Compute scalers for effective chat-only latents
-            compute_scalers(
-                dataset=dataset,
-                dictionary_model=dictionary_model,
-                results_dir=results_dir,
-                latent_indices=th.tensor(effective_ft_only_latents_indices),
-                latent_indices_name="effective_ft_only_latents",
-                num_samples=num_samples,
-                ft_error=ft_error,
-                base_error=base_error,
-                target_model_idx=1,
-                smaller_batch_size_for_error=True,
-            )
-            th.save(
-                effective_ft_only_latents_indices,
-                results_dir / "effective_ft_only_latent_indices" / "indices.pt",
-            )
-            logger.info(
-                f"Computing error scalars for {len(shared_baseline_indices)} shared baseline latents"
-            )
-            # Compute scalers for shared baseline latents
-            compute_scalers(
-                dataset=dataset,
-                dictionary_model=dictionary_model,
-                results_dir=results_dir,
-                latent_indices=th.tensor(shared_baseline_indices),
-                latent_indices_name="shared_baseline_latents",
-                num_samples=num_samples,
-                ft_error=ft_error,
-                base_error=base_error,
-                target_model_idx=1,
-                smaller_batch_size_for_error=True,
-            )
-            th.save(
-                shared_baseline_indices,
-                results_dir / "shared_baseline_latent_indices" / "indices.pt",
-            )
-        except Exception as e:
-            logger.warning(
-                f"Could not load latent dataframe for {dictionary_model}: {e}"
-            )
-            logger.warning("Skipping error computation on latent subsets")
+        # Get shared baseline indices by sampling from "Shared" tag latents
+        shared_baseline_indices = (
+            df[df["tag"] == "Shared"]
+            .sample(n=len(effective_ft_only_latents_indices), random_state=42)
+            .index.tolist()
+        )
+
+        logger.info(
+            f"Computing error scalars for {len(effective_ft_only_latents_indices)} effective chat-only latents"
+        )
+        compute_scalers(
+            dataset=dataset,
+            dictionary_model=dictionary_model,
+            results_dir=results_dir,
+            latent_indices=th.tensor(effective_ft_only_latents_indices),
+            latent_indices_name="effective_ft_only_latents",
+            num_samples=num_samples,
+            ft_error=ft_error,
+            base_error=base_error,
+            is_sae=is_sae,
+            sae_model=sae_model,
+            is_difference_sae=is_difference_sae,
+            smaller_batch_size_for_error=True,
+        )
+        th.save(
+            effective_ft_only_latents_indices,
+            results_dir / "effective_ft_only_latent_indices" / "indices.pt",
+        )
+        logger.info(
+            f"Computing error scalars for {len(shared_baseline_indices)} shared baseline latents"
+        )
+        # Compute scalers for shared baseline latents
+        compute_scalers(
+            dataset=dataset,
+            dictionary_model=dictionary_model,
+            results_dir=results_dir,
+            latent_indices=th.tensor(shared_baseline_indices),
+            latent_indices_name="shared_baseline_latents",
+            num_samples=num_samples,
+            ft_error=ft_error,
+            is_sae=is_sae,
+            sae_model=sae_model,
+            is_difference_sae=is_difference_sae,
+            base_error=base_error,
+            smaller_batch_size_for_error=True,
+        )
+        th.save(
+            shared_baseline_indices,
+            results_dir / "shared_baseline_latent_indices" / "indices.pt",
+        )
 
 
 def compute_scalers(
@@ -476,11 +525,13 @@ def compute_scalers(
     results_dir = results_dir / latent_indices_name
     results_dir.mkdir(parents=True, exist_ok=True)
 
-    print("Saving results to ", results_dir)
+    logger.info("Saving results to ", results_dir)
     encode_activation_fn = identity_fn
     if isinstance(dict_model, BatchTopKSAE):
         # Deal with BatchTopKSAE
-        print("BatchTopKSAE detected, using load_ft_activation as encode_activation_fn")
+        logger.debug(
+            "BatchTopKSAE detected, using load_ft_activation as encode_activation_fn"
+        )
         if is_difference_sae:
             encode_activation_fn = partial(
                 load_difference_activation, sae_model=sae_model
@@ -550,7 +601,6 @@ def compute_scalers(
         latent_vectors = random_indices_vectors
 
     # Run all computations
-    betas = {}
     for exp_name, loader_fn in computations:
         exp_name += f"_N{num_samples}"
         if threshold_active_latents is not None:
@@ -584,12 +634,9 @@ def compute_scalers(
             encode_activation_fn=encode_activation_fn,
             latent_activation_postprocessing_fn=latent_activation_postprocessing_fn,
         )
-        betas[exp_name] = betas.cpu()
         th.save(betas.cpu(), results_dir / f"betas_{exp_name}.pt")
 
         if random_indices or random_vectors:
             th.save(latent_vectors.cpu(), results_dir / f"latent_vectors_{exp_name}.pt")
         if random_indices:
             th.save(random_indices.cpu(), results_dir / f"random_indices_{exp_name}.pt")
-
-    return betas

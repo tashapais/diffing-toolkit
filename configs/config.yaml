@@ -32,7 +32,7 @@ preprocessing:
   activation_store_dir: ${infrastructure.storage.base_dir}/activations
   layers: [0.25, 0.5, 0.75]  # layers to extract activations from
   max_samples_per_dataset: 100000
-  max_tokens_per_dataset: 20_000_000
+  max_tokens_per_dataset: 10_000_000
   batch_size: 64
   context_len: 1024
   dtype: bfloat16

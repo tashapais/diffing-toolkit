@@ -1,19 +1,16 @@
 # @package diffing.method
-name: crosscoder
+name: sae_difference
 
 # Training parameters - inherits data config from preprocessing
 training:
+  target: "difference_ftb"  # ["difference_bft", "difference_ftb"] - which difference to compute
   expansion_factor: 32
   batch_size: 2048
   epochs: 1
   lr: 1e-3
   max_steps: null  # Auto-calculate from dataset size
   validate_every_n_steps: 10000
-  mu: 1e-1  # L1 penalty for ReLU type
-  k: 100   # Sparsity for batch-top-k type
-  k_max: 1024
-  k_annealing_steps: 2000
-  auxk_alpha: 0.03125  # 1/32
+  k: 100   # Sparsity for batch-top-k SAE
   
   # Data configuration
   num_samples: 100_000_000
@@ -21,24 +18,23 @@ training:
   local_shuffling: true
   local_shuffling_shard_size: 1_000_000
   workers: 16
-
   overwrite: false
   
 datasets:
   use_chat_dataset: true
   use_pretraining_dataset: true
   use_training_dataset: true
+  # Normalization configuration for difference computation
   normalization:
     enabled: true
+    subsample_size: 1_000_000  # Number of samples to use for std computation
+    batch_size: 4096
+    cache_dir: "${infrastructure.storage.base_dir}/diff_normalizer"
 
-# Model configuration
+# Model configuration - only BatchTopK supported
 model:
-  type: "batch-top-k"  # ["relu", "batch-top-k"]
-  code_normalization: "crosscoder"  # ["crosscoder", "sae", "mixed", "decoupled", "none"]
-  same_init_for_all_layers: true
-  norm_init_scale: 1.0
-  init_with_transpose: true
-  
+  type: "batch-top-k"  # Only batch-top-k supported for SAE difference
+
 # Training optimization
 optimization:
   resample_steps: null
@@ -53,7 +49,7 @@ analysis:
   latent_scaling:
     enabled: true
     dataset_split: "train"
-    targets: [] #["base_error", "ft_error", "base_reconstruction", "ft_reconstruction", "base_activation", "ft_activation"]
+    targets: ["base_activation", "ft_activation"]
     num_samples: 1_000_000
     batch_size: 128
     num_workers: 4
@@ -61,7 +57,7 @@ analysis:
     dtype: "float32"
     num_effective_ft_only_latents: 5000
     overwrite: false
-
+    
   latent_activations: # Collect latent activations for all datasets and layers
     enabled: true
     split: "validation"
@@ -72,4 +68,4 @@ analysis:
     max_num_samples: 10000 # Maximum number of samples to collect per dataset
 
 upload:
-  model: true
+  model: false

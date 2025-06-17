@@ -10,6 +10,7 @@ from .pipeline import Pipeline
 from src.diffing.methods.kl import KLDivergenceDiffingMethod
 from src.diffing.methods.normdiff import NormDiffDiffingMethod
 from src.diffing.methods.crosscoder import CrosscoderDiffingMethod
+from src.diffing.methods.sae_difference import SAEDifferenceMethod
 
 class DiffingPipeline(Pipeline):
     """
@@ -37,6 +38,8 @@ class DiffingPipeline(Pipeline):
             return NormDiffDiffingMethod(self.cfg)
         elif method_name == "crosscoder":
             return CrosscoderDiffingMethod(self.cfg)
+        elif method_name == "sae_difference":
+            return SAEDifferenceMethod(self.cfg)
         else:
             raise ValueError(f"Unknown diffing method: {method_name}")
     

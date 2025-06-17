@@ -128,10 +128,8 @@ def load_betas(
     betas_dir_path: Path,
     num_samples: int = 50_000_000,
     computation: str = "base_error",
-    n_offset: int = 0,
-    suffix: str = "",
 ):
-    betas_filename = f"betas_{computation}_N{num_samples}_n_offset{n_offset}{suffix}.pt"
+    betas_filename = f"betas_{computation}_N{num_samples}.pt"
 
     if not (betas_dir_path / betas_filename).exists():
         raise FileNotFoundError(
@@ -140,3 +138,11 @@ def load_betas(
 
     betas = th.load(betas_dir_path / betas_filename, weights_only=True).cpu()
     return betas
+
+def betas_exist(
+    betas_dir_path: Path,
+    num_samples: int = 50_000_000,
+    computation: str = "base_error",
+):
+    betas_filename = f"betas_{computation}_N{num_samples}.pt"
+    return (betas_dir_path / betas_filename).exists()
