@@ -11,6 +11,21 @@ from src.diffing.methods.kl import KLDivergenceDiffingMethod
 from src.diffing.methods.normdiff import NormDiffDiffingMethod
 from src.diffing.methods.crosscoder import CrosscoderDiffingMethod
 from src.diffing.methods.sae_difference import SAEDifferenceMethod
+from src.diffing.methods.diffing_method import DiffingMethod
+
+
+def get_method_class(method_name: str) -> DiffingMethod:
+    """Get the appropriate method class for a given method name."""
+    if method_name == "kl":
+        return KLDivergenceDiffingMethod
+    elif method_name == "normdiff":
+        return NormDiffDiffingMethod
+    elif method_name == "crosscoder":
+        return CrosscoderDiffingMethod
+    elif method_name == "sae_difference":
+        return SAEDifferenceMethod
+    else:
+        raise ValueError(f"Unknown method: {method_name}")
 
 class DiffingPipeline(Pipeline):
     """
@@ -26,22 +41,7 @@ class DiffingPipeline(Pipeline):
         self.diffing_cfg = cfg.diffing
         
         # Initialize diffing method
-        self.diffing_method = self._create_diffing_method()
-        
-    def _create_diffing_method(self):
-        """Create the appropriate diffing method based on configuration."""
-        method_name = self.diffing_cfg.method.name
-        
-        if method_name == "kl_divergence":
-            return KLDivergenceDiffingMethod(self.cfg)
-        elif method_name == "normdiff":
-            return NormDiffDiffingMethod(self.cfg)
-        elif method_name == "crosscoder":
-            return CrosscoderDiffingMethod(self.cfg)
-        elif method_name == "sae_difference":
-            return SAEDifferenceMethod(self.cfg)
-        else:
-            raise ValueError(f"Unknown diffing method: {method_name}")
+        self.diffing_method = get_method_class(self.diffing_cfg.method.name)(self.cfg)
     
     def validate_config(self) -> None:
         """Validate the diffing pipeline configuration."""

@@ -22,7 +22,7 @@ from .diffing_method import DiffingMethod
 from src.utils.activations import get_layer_indices, load_activation_dataset_from_config
 from src.utils.configs import get_dataset_configurations, DatasetConfig  
 from src.utils.cache import SampleCache
-from src.utils.maximum_tracker import MaximumTracker
+from src.utils.maximum_activating_examples import MaxActStore
 from src.utils.dashboards import AbstractOnlineDiffingDashboard
 
 
@@ -243,9 +243,17 @@ class NormDiffDiffingMethod(DiffingMethod):
         # Load sample cache for this dataset and layer
         sample_cache, tokenizer = self.load_sample_cache(dataset_cfg, layer)
         
-        # Initialize maximum tracker
+        # Initialize maximum examples store
         num_examples = self.method_cfg.analysis.max_activating_examples.num_examples
-        max_tracker = MaximumTracker(num_examples, tokenizer)
+        # Use dataset and layer specific database path
+        safe_name = dataset_cfg.id.split("/")[-1]
+        dataset_dir = self.results_dir / safe_name
+        dataset_dir.mkdir(parents=True, exist_ok=True)
+        max_store = MaxActStore(
+            dataset_dir / f"layer_{layer}_examples.db",
+            max_examples=num_examples,
+            tokenizer=tokenizer
+        )
 
         # Create dataset and dataloader
         dataset = SampleCacheDataset(sample_cache, self.method_cfg.method_params.max_samples)
@@ -278,8 +286,8 @@ class NormDiffDiffingMethod(DiffingMethod):
                 # Find max norm difference in this sample
                 max_norm_value = torch.max(norm_diffs).item()
                 
-                # Add to maximum tracker
-                max_tracker.add_example(
+                # Add to maximum examples store
+                max_store.add_example(
                     score=max_norm_value,
                     input_ids=tokens,
                     scores_per_token=norm_diffs,
@@ -307,7 +315,7 @@ class NormDiffDiffingMethod(DiffingMethod):
             'dataset_id': dataset_cfg.id,
             'layer': layer,
             'statistics': statistics,
-            'max_activating_examples': max_tracker.get_top_examples(),
+            'max_activating_examples': max_store.get_top_examples(),
             'total_tokens_processed': total_tokens,
             'total_samples_processed': processed_samples,
             'metadata': {

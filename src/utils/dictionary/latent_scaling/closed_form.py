@@ -232,12 +232,33 @@ def compute_scalers_from_config(
             results_dir / "closed_form_scalars" / "all_latents", num_samples, "base_activation_no_bias"
         )
 
+    # Log which scalers will be computed
+    scalers_to_compute = []
+    if ft_error:
+        scalers_to_compute.append("ft_error")
+    if base_error:
+        scalers_to_compute.append("base_error")
+    if ft_reconstruction:
+        scalers_to_compute.append("ft_reconstruction")
+    if base_reconstruction:
+        scalers_to_compute.append("base_reconstruction")
+    if ft_activation:
+        scalers_to_compute.append("ft_activation")
+    if base_activation:
+        scalers_to_compute.append("base_activation")
+    if ft_activation_no_bias:
+        scalers_to_compute.append("ft_activation_no_bias")
+    if base_activation_no_bias:
+        scalers_to_compute.append("base_activation_no_bias")
+    
+    logger.info(f"Scalers to compute: {scalers_to_compute}")
+
     # Configuration for error computation on latent subsets
     num_effective_ft_only_latents = ls_cfg.num_effective_ft_only_latents
 
     # Setup paths
     # Load validation dataset
-    train_dataset, val_dataset, _, _ = setup_training_datasets(
+    train_dataset, val_dataset, _, _, _ = setup_training_datasets(
         cfg, layer, overwrite_num_samples=num_samples, overwrite_local_shuffling=False
     )
     if ls_cfg.dataset_split == "train":
@@ -300,9 +321,9 @@ def compute_scalers_from_config(
                 .index.tolist()
             )
 
-        # Get shared baseline indices by sampling from "Shared" tag latents
+        # Get shared baseline indices by sampling from "shared" tag latents
         shared_baseline_indices = (
-            df[df["tag"] == "Shared"]
+            df[df["tag"] == "shared"]
             .sample(n=len(effective_ft_only_latents_indices), random_state=42)
             .index.tolist()
         )
@@ -324,9 +345,11 @@ def compute_scalers_from_config(
             is_difference_sae=is_difference_sae,
             smaller_batch_size_for_error=True,
         )
+        effective_dir = results_dir / "closed_form_scalars" / "effective_ft_only_latent"
+        effective_dir.mkdir(parents=True, exist_ok=True)
         th.save(
             effective_ft_only_latents_indices,
-            results_dir / "effective_ft_only_latent_indices" / "indices.pt",
+            effective_dir / "indices.pt",
         )
         logger.info(
             f"Computing error scalars for {len(shared_baseline_indices)} shared baseline latents"
@@ -346,9 +369,11 @@ def compute_scalers_from_config(
             base_error=base_error,
             smaller_batch_size_for_error=True,
         )
+        shared_dir = results_dir / "closed_form_scalars" / "shared_baseline_latent"
+        shared_dir.mkdir(parents=True, exist_ok=True)
         th.save(
             shared_baseline_indices,
-            results_dir / "shared_baseline_latent_indices" / "indices.pt",
+            shared_dir / "indices.pt",
         )
 
 

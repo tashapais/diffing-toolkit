@@ -11,7 +11,6 @@ from omegaconf import OmegaConf
 from tqdm import tqdm, trange
 import json
 from dictionary_learning import CrossCoder, BatchTopKCrossCoder
-from dictionary_learning.cache import ActivationNormalizer
 from dictionary_learning.trainers.crosscoder import (
     CrossCoderTrainer,
     BatchTopKCrossCoderTrainer,
@@ -31,11 +30,13 @@ from ..activations import (
     calculate_samples_per_dataset,
 )
 from ..configs import get_model_configurations, get_dataset_configurations
-from ..dictionary.utils import push_dictionary_model 
+from ..dictionary.utils import push_dictionary_model
 from ..cache import DifferenceCache
 
 
-def combine_normalizer(caches: List[PairedActivationCache]) -> ActivationNormalizer:
+def combine_normalizer(
+    caches: List[PairedActivationCache],
+) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Compute the normalizer for a dictionary of caches.
     """
@@ -51,7 +52,7 @@ def combine_normalizer(caches: List[PairedActivationCache]) -> ActivationNormali
 
     mean = torch.stack([running_stats_1.mean, running_stats_2.mean], dim=0)
     std = torch.stack([running_stats_1.std(), running_stats_2.std()], dim=0)
-    return ActivationNormalizer(mean, std)
+    return mean, std
 
 
 def setup_sae_cache(
@@ -84,26 +85,33 @@ def setup_sae_cache(
 
     return processed_cache
 
+
 def recompute_diff_normalizer(
     caches: List[PairedActivationCache],
     target: str,
     subsample_size: int,
+    layer: int,
     batch_size: int = 4096,
     cache_dir: str = None,
-) -> ActivationNormalizer:
+) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Recompute the normalizer for a dictionary of caches.
     """
     # Compute hash by hashing the configs of all caches
-    cache_hash = hashlib.sha256(json.dumps([cache.activation_cache_1.config for cache in caches] + [cache.activation_cache_2.config for cache in caches]).encode()).hexdigest()
+    cache_hash = hashlib.sha256(
+        json.dumps(
+            [cache.activation_cache_1.config for cache in caches]
+            + [cache.activation_cache_2.config for cache in caches]
+            + [layer]
+        ).encode()
+    ).hexdigest()
     if cache_dir is not None:
         cache_dir = Path(cache_dir) / cache_hash
         if (cache_dir / "mean.pt").exists() and (cache_dir / "std.pt").exists():
             logger.info(f"Loading existing normalizer from {cache_dir}")
             mean = torch.load(cache_dir / "mean.pt")
             std = torch.load(cache_dir / "std.pt")
-            return ActivationNormalizer(mean, std)
-
+            return mean, std
 
     logger.info(f"Recomputing normalizer for {len(caches)} caches")
     cache_dir.mkdir(parents=True, exist_ok=True)
@@ -137,7 +145,12 @@ def recompute_diff_normalizer(
         # Sort the indices for better cache locality
         sample_indices = sample_indices[torch.argsort(sample_indices)]
         # Process in batches
-        for i in trange(0, len(sample_indices), batch_size, desc=f"Processing cache {j}/{len(caches)}"):
+        for i in trange(
+            0,
+            len(sample_indices),
+            batch_size,
+            desc=f"Processing cache {j}/{len(caches)}",
+        ):
             running_stats.update(
                 torch.stack(
                     [diff_cache[i] for i in sample_indices[i : i + batch_size]], dim=0
@@ -153,7 +166,7 @@ def recompute_diff_normalizer(
         torch.save(mean, cache_dir / "mean.pt")
         torch.save(std, cache_dir / "std.pt")
 
-    return ActivationNormalizer(mean, std)
+    return mean, std
 
 
 def setup_training_datasets(
@@ -205,9 +218,10 @@ def setup_training_datasets(
     }  # Dict {dataset_name: PairedActivationCache}
 
     if normalizer_function is not None:
-        normalizer = normalizer_function(list(caches.values()))
+        normalize_mean, normalize_std = normalizer_function(list(caches.values()))
     else:
-        normalizer = None
+        normalize_mean = None
+        normalize_std = None
 
     if dataset_processing_function is not None:
         caches = {
@@ -268,7 +282,6 @@ def setup_training_datasets(
         split="validation",
     )
 
-    
     # Collapse layers
     caches_val = {
         dataset_name: caches_val[dataset_name][layer] for dataset_name in caches_val
@@ -279,7 +292,7 @@ def setup_training_datasets(
             dataset_name: dataset_processing_function(caches_val[dataset_name])
             for dataset_name in caches_val
         }
-        
+
     num_validation_samples = [
         len(caches_val[dataset_name]) for dataset_name in caches_val
     ]
@@ -304,11 +317,20 @@ def setup_training_datasets(
     logger.info(f"Training dataset: {len(train_dataset)} samples")
     logger.info(f"Validation dataset: {len(validation_dataset)} samples")
 
-    return train_dataset, validation_dataset, epoch_numbers, normalizer
+    return (
+        train_dataset,
+        validation_dataset,
+        epoch_numbers,
+        normalize_mean,
+        normalize_std,
+    )
 
 
 def create_training_dataloader(
-    dataset: Dataset, cfg: DictConfig, shuffle: bool = True, overwrite_batch_size: int = None
+    dataset: Dataset,
+    cfg: DictConfig,
+    shuffle: bool = True,
+    overwrite_batch_size: int = None,
 ) -> DataLoader:
     """
     Create DataLoader with configuration from preprocessing and method settings.
@@ -325,7 +347,11 @@ def create_training_dataloader(
 
     return DataLoader(
         dataset,
-        batch_size=training_cfg.batch_size if overwrite_batch_size is None else overwrite_batch_size,
+        batch_size=(
+            training_cfg.batch_size
+            if overwrite_batch_size is None
+            else overwrite_batch_size
+        ),
         shuffle=shuffle
         and not training_cfg.local_shuffling,  # Don't shuffle if using local shuffling
         num_workers=training_cfg.workers,
@@ -361,8 +387,14 @@ def upload_config_to_wandb(cfg: DictConfig) -> None:
         # Clean up temporary file
         Path(temp_path).unlink()
 
+
 ### Crosscoder ###
-def crosscoder_run_name(cfg: DictConfig, layer: int, base_model_cfg: DictConfig, finetuned_model_cfg: DictConfig) -> str:   
+def crosscoder_run_name(
+    cfg: DictConfig,
+    layer: int,
+    base_model_cfg: DictConfig,
+    finetuned_model_cfg: DictConfig,
+) -> str:
     method_cfg = cfg.diffing.method
     expansion_factor = method_cfg.training.expansion_factor
     lr = method_cfg.training.lr
@@ -388,12 +420,17 @@ def crosscoder_run_name(cfg: DictConfig, layer: int, base_model_cfg: DictConfig,
 
     return run_name
 
-def sae_difference_run_name(cfg: DictConfig, layer: int, base_model_cfg: DictConfig, finetuned_model_cfg: DictConfig) -> str:
+
+def sae_difference_run_name(
+    cfg: DictConfig,
+    layer: int,
+    base_model_cfg: DictConfig,
+    finetuned_model_cfg: DictConfig,
+) -> str:
     method_cfg = cfg.diffing.method
     expansion_factor = method_cfg.training.expansion_factor
     lr = method_cfg.training.lr
     k = method_cfg.training.k
-
 
     target = method_cfg.training.target
     target_short = target.split("_")[1]  # "bft" or "ftb"
@@ -405,12 +442,14 @@ def sae_difference_run_name(cfg: DictConfig, layer: int, base_model_cfg: DictCon
 
     return run_name
 
+
 def create_crosscoder_trainer_config(
     cfg: DictConfig,
     layer: int,
     activation_dim: int,
     device: str,
-    normalizer: ActivationNormalizer,
+    normalize_mean: torch.Tensor,
+    normalize_std: torch.Tensor,
     run_name: str,
 ) -> Dict[str, Any]:
     """
@@ -421,6 +460,9 @@ def create_crosscoder_trainer_config(
         layer: Layer index being trained
         activation_dim: Dimension of input activations
         device: Training device
+        normalize_mean: Mean of the activations
+        normalize_std: Std of the activations
+        run_name: Name of the run
 
     Returns:
         Trainer configuration dictionary
@@ -464,7 +506,8 @@ def create_crosscoder_trainer_config(
             "code_normalization_alpha_sae": 1.0,
             "code_normalization_alpha_cc": 0.1,
         },
-        "activation_normalizer": normalizer,
+        "activation_mean": normalize_mean,
+        "activation_std": normalize_std,
     }
 
     # Type-specific configuration
@@ -506,8 +549,16 @@ def train_crosscoder_for_layer(
     logger.info(f"Training crosscoder for layer {layer_idx}")
 
     # Setup training datasets
-    train_dataset, val_dataset, epoch_idx_per_step, normalizer = (
-        setup_training_datasets(cfg, layer_idx, normalizer_function=combine_normalizer if cfg.diffing.method.datasets.normalization.enabled else None)
+    train_dataset, val_dataset, epoch_idx_per_step, normalize_mean, normalize_std = (
+        setup_training_datasets(
+            cfg,
+            layer_idx,
+            normalizer_function=(
+                combine_normalizer
+                if cfg.diffing.method.datasets.normalization.enabled
+                else None
+            ),
+        )
     )
 
     # Get activation dimension from first sample
@@ -519,12 +570,17 @@ def train_crosscoder_for_layer(
 
     # Create trainer configuration
     trainer_config = create_crosscoder_trainer_config(
-        cfg, layer_idx, activation_dim, device, normalizer, run_name
+        cfg, layer_idx, activation_dim, device, normalize_mean, normalize_std, run_name
     )
 
     # Create data loaders
     train_dataloader = create_training_dataloader(train_dataset, cfg, shuffle=True)
-    val_dataloader = create_training_dataloader(val_dataset, cfg, shuffle=False, overwrite_batch_size=cfg.diffing.method.training.batch_size*4)
+    val_dataloader = create_training_dataloader(
+        val_dataset,
+        cfg,
+        shuffle=False,
+        overwrite_batch_size=cfg.diffing.method.training.batch_size * 4,
+    )
 
     # Calculate max steps if not specified
     max_steps = cfg.diffing.method.training.max_steps
@@ -592,6 +648,7 @@ def train_crosscoder_for_layer(
 
 ### SAE Difference ###
 
+
 def create_sae_difference_trainer_config(
     cfg: DictConfig,
     layer: int,
@@ -599,7 +656,8 @@ def create_sae_difference_trainer_config(
     max_steps: int,
     device: str,
     target: str,
-    normalizer: ActivationNormalizer,
+    normalize_mean: torch.Tensor,
+    normalize_std: torch.Tensor,
     run_name: str,
 ) -> Dict[str, Any]:
     """
@@ -611,7 +669,9 @@ def create_sae_difference_trainer_config(
         activation_dim: Dimension of input activations
         device: Training device
         target: Training target (difference_bft or difference_ftb)
-
+        normalize_mean: Mean of the activations
+        normalize_std: Std of the activations
+        run_name: Name of the run
     Returns:
         Tuple of (trainer configuration dictionary, run name)
     """
@@ -642,10 +702,12 @@ def create_sae_difference_trainer_config(
         "lm_name": f"{finetuned_model_cfg.model_id}-{base_model_cfg.model_id}",
         "wandb_name": run_name,
         "k": k,
-        "activation_normalizer": normalizer,
+        "activation_mean": normalize_mean,
+        "activation_std": normalize_std,
     }
 
     return trainer_config
+
 
 def train_sae_difference_for_layer(
     cfg: DictConfig,
@@ -701,19 +763,26 @@ def train_sae_difference_for_layer(
     caches = {dataset_name: caches[dataset_name][layer_idx] for dataset_name in caches}
 
     # Setup training datasets with difference cache processing
-    train_dataset, val_dataset, epoch_idx_per_step, normalizer = setup_training_datasets(
-        cfg,
-        layer_idx,
-        dataset_processing_function=lambda x: setup_sae_cache(
-            target=target, paired_cache=x
-        ),
-        normalizer_function=lambda x: recompute_diff_normalizer(
-            x,
-            target=target,
-            subsample_size=cfg.diffing.method.datasets.normalization.subsample_size,
-            batch_size=cfg.diffing.method.datasets.normalization.batch_size,
-            cache_dir=cfg.diffing.method.datasets.normalization.cache_dir,
-        ) if cfg.diffing.method.datasets.normalization.enabled else None,
+    train_dataset, val_dataset, epoch_idx_per_step, normalize_mean, normalize_std = (
+        setup_training_datasets(
+            cfg,
+            layer_idx,
+            dataset_processing_function=lambda x: setup_sae_cache(
+                target=target, paired_cache=x
+            ),
+            normalizer_function=lambda x: (
+                recompute_diff_normalizer(
+                    x,
+                    target=target,
+                    subsample_size=cfg.diffing.method.datasets.normalization.subsample_size,
+                    batch_size=cfg.diffing.method.datasets.normalization.batch_size,
+                    cache_dir=cfg.diffing.method.datasets.normalization.cache_dir,
+                    layer=layer_idx,
+                )
+                if cfg.diffing.method.datasets.normalization.enabled
+                else None
+            ),
+        )
     )
 
     # Get activation dimension from first sample
@@ -725,7 +794,12 @@ def train_sae_difference_for_layer(
 
     # Create data loaders
     train_dataloader = create_training_dataloader(train_dataset, cfg, shuffle=True)
-    val_dataloader = create_training_dataloader(val_dataset, cfg, shuffle=False, overwrite_batch_size=cfg.diffing.method.training.batch_size*4)
+    val_dataloader = create_training_dataloader(
+        val_dataset,
+        cfg,
+        shuffle=False,
+        overwrite_batch_size=cfg.diffing.method.training.batch_size * 4,
+    )
 
     # Calculate max steps if not specified
     max_steps = cfg.diffing.method.training.max_steps
@@ -734,9 +808,16 @@ def train_sae_difference_for_layer(
 
     # Create trainer configuration for SAE difference
     trainer_config = create_sae_difference_trainer_config(
-        cfg, layer_idx, activation_dim, max_steps, device, target, normalizer, run_name
+        cfg,
+        layer_idx,
+        activation_dim,
+        max_steps,
+        device,
+        target,
+        normalize_mean,
+        normalize_std,
+        run_name,
     )
-
 
     validate_every_n_steps = cfg.diffing.method.training.validate_every_n_steps
 
@@ -772,6 +853,13 @@ def train_sae_difference_for_layer(
 
     if cfg.diffing.method.upload.model:
         hf_repo_id = push_dictionary_model(Path(save_dir) / "model_final.pt")
+    else:
+        logger.warning(
+            f"Not uploading model to Hugging Face because upload.model is False, which can break downstream code. Only use this if you know what you are doing."
+        )
+        raise ValueError(
+            "Upload model is False, only use for debugging (because downstream code will load from hf only)."
+        )
 
     # Collect training metrics
     training_metrics = {
@@ -792,4 +880,3 @@ def train_sae_difference_for_layer(
 
     logger.info(f"Successfully trained SAE difference for layer {layer_idx}")
     return training_metrics, Path(save_dir) / "model_final.pt"
-

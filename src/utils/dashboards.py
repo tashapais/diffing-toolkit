@@ -7,11 +7,12 @@ import time
 import traceback
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, List, Tuple
 import streamlit as st
 import torch
 import numpy as np
 from IPython.display import HTML
+import sqlite3
 
 # Import tiny_dashboard components
 from tiny_dashboard.html_utils import (
@@ -25,8 +26,12 @@ from tiny_dashboard.html_utils import (
 )
 from tiny_dashboard.utils import apply_chat
 
-from src.utils.visualization import render_streamlit_html
-
+from src.utils.visualization import (
+    filter_examples_by_search,
+    create_examples_html,
+    render_streamlit_html,
+)
+        
 
 class AbstractOnlineDiffingDashboard(ABC):
     """
@@ -447,3 +452,191 @@ class AbstractOnlineDiffingDashboard(ABC):
     def _render_streamlit_method_controls(self) -> Dict[str, Any]:
         """Render method-specific controls in Streamlit and return parameters."""
         pass
+
+class MaxActivationDashboardComponent:
+    """
+    Reusable Streamlit component for displaying MaxActStore contents.
+    
+    Features:
+    - Mandatory latent selection (if latents exist) via text input
+    - Optional quantile filtering via selectbox
+    - Text search functionality
+    - Shows all examples (no limit)
+    - Filter context display
+    """
+
+    def __init__(self, max_store, title: str = "Maximum Activating Examples"):
+        """
+        Args:
+            max_store: MaxActStore instance
+            title: Title for the dashboard
+        """
+        self.max_store = max_store
+        self.title = title
+
+    def _get_available_latents(self) -> List[int]:
+        """Get list of available latent indices from the database."""
+        with sqlite3.connect(self.max_store.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT DISTINCT latent_idx FROM examples WHERE latent_idx IS NOT NULL ORDER BY latent_idx")
+            return [row[0] for row in cursor.fetchall()]
+
+    def _get_available_quantiles(self) -> List[int]:
+        """Get list of available quantile indices from the database."""
+        with sqlite3.connect(self.max_store.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT DISTINCT quantile_idx FROM examples WHERE quantile_idx IS NOT NULL ORDER BY quantile_idx")
+            return [row[0] for row in cursor.fetchall()]
+
+    def _convert_maxstore_to_dashboard_format(self, examples: List[Dict[str, Any]]) -> List[Tuple[float, List[str], List[float], str]]:
+        """
+        Convert MaxActStore examples to dashboard format.
+        
+        Args:
+            examples: List of examples from MaxActStore.get_top_examples()
+            
+        Returns:
+            List of tuples (max_score, tokens, scores_per_token, text)
+        """
+        if not examples:
+            return []
+            
+        dashboard_examples = []
+        
+        for example in examples:
+            # Get detailed information including scores_per_token
+            details = self.max_store.get_example_details(example["example_id"])
+            
+            # Check if we have per-token scores
+            if "scores_per_token" in details:
+                tokens = self.max_store.tokenizer.convert_ids_to_tokens(example["input_ids"])
+                scores_per_token = np.array(details["scores_per_token"])
+                
+                # Normalize scores (subtract minimum to ensure non-negative)
+                scores_per_token = scores_per_token - scores_per_token.min()
+                
+                dashboard_examples.append((
+                    example["max_score"],
+                    tokens,
+                    scores_per_token,
+                    example["text"]
+                ))
+            else:
+                raise ValueError(f"Could not process example {example['example_id']}: {details}")
+                    
+                
+        return dashboard_examples
+
+    def display(self):
+        """Render the dashboard component."""
+
+        st.markdown(f"### {self.title}")
+        
+        # Get available filter options
+        available_latents = self._get_available_latents()
+        available_quantiles = self._get_available_quantiles()
+        
+        # Initialize filter values
+        selected_latent = None
+        selected_quantile = None
+        
+        # Latent selection (mandatory if latents exist)
+        if available_latents:
+            col1, col2 = st.columns([2, 1])
+            with col1:
+                latent_input = st.number_input(
+                    "Latent Index (required)",
+                    min_value=min(available_latents),
+                    max_value=max(available_latents),
+                    value=available_latents[0],
+                    step=1,
+                    help=f"Available latent indices: {min(available_latents)}-{max(available_latents)}"
+                )
+                
+                # Validate the input
+                if latent_input in available_latents:
+                    selected_latent = latent_input
+                else:
+                    st.error(f"Latent index {latent_input} not available. Available indices: {available_latents[:10]}{'...' if len(available_latents) > 10 else ''}")
+                    return
+            
+            with col2:
+                st.metric("Available Latents", len(available_latents))
+        
+        # Quantile selection (optional)
+        if available_quantiles:
+            quantile_options = ["All"] + [str(q) for q in available_quantiles]
+            selected_quantile_str = st.selectbox(
+                "Quantile Filter",
+                options=quantile_options,
+                help="Filter by quantile index (optional)"
+            )
+            
+            if selected_quantile_str != "All":
+                selected_quantile = int(selected_quantile_str)
+        
+        # Search functionality
+        search_term = st.text_input(
+            "🔍 Search in examples",
+            placeholder="Enter text to search for in the examples...",
+        )
+        
+        # Build filter context message
+        filter_parts = []
+        if selected_latent is not None:
+            filter_parts.append(f"Latent {selected_latent}")
+        if selected_quantile is not None:
+            filter_parts.append(f"Quantile {selected_quantile}")
+        if search_term.strip():
+            filter_parts.append(f"Search: '{search_term}'")
+        
+        # For methods without latents, we can still proceed
+        if available_latents and selected_latent is None:
+            st.info("Please select a latent index to view examples.")
+            return
+        
+        # Get examples from store
+        examples = self.max_store.get_top_examples(
+            latent_idx=selected_latent,
+            quantile_idx=selected_quantile
+        )
+        
+        # Convert to dashboard format
+        dashboard_examples = self._convert_maxstore_to_dashboard_format(examples)
+        
+        # Apply search filter
+        if search_term.strip():
+            dashboard_examples = filter_examples_by_search(dashboard_examples, search_term)
+        
+        # Display filter context
+        context_msg = f"Showing {len(dashboard_examples)} examples"
+        if filter_parts:
+            context_msg += f" ({', '.join(filter_parts)})"
+        else:
+            context_msg += " (all examples)"
+        st.info(context_msg)
+        
+        # Check if we have examples to show
+        if not dashboard_examples:
+            if search_term.strip():
+                st.warning("No examples found matching your search and filters.")
+            else:
+                st.warning("No examples found with the selected filters.")
+            return
+        
+        # Create and render HTML visualization
+        title_with_filters = self.title
+        if filter_parts:
+            title_with_filters += f" - {', '.join(filter_parts)}"
+        
+        html_content = create_examples_html(
+            dashboard_examples,
+            self.max_store.tokenizer,
+            title=title_with_filters,
+            max_examples=len(dashboard_examples),  # Show all examples
+            window_size=50,
+            use_absolute_max=False,
+        )
+        
+        # Render in Streamlit
+        render_streamlit_html(html_content)

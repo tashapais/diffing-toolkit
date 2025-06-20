@@ -27,7 +27,7 @@ from src.utils.dictionary.utils import load_latent_df, push_latent_df
 from src.utils.dictionary.training import setup_sae_cache
 
 @torch.no_grad()
-def get_positive_activations(sample_cache: SampleCache, cc, latent_ids):
+def get_positive_activations(sample_cache: SampleCache, cc, latent_ids, expected_sparsity=100):
     """
     Extract positive activations and their indices from sequences using SampleCache.
     Also compute the maximum activation for each latent feature.
@@ -43,25 +43,41 @@ def get_positive_activations(sample_cache: SampleCache, cc, latent_ids):
         - indices tensor: in (seq_idx, seq_pos, feature_pos) format
         - max_activations: maximum activation value for each latent feature
     """
-    out_activations = []
-    out_ids = []
-    seq_ranges = [0]        
-
+    # Estimate total number of positive activations based on typical sparsity
+    # Assume ~5% sparsity on average (can be tuned based on your data)
+    total_tokens = sum(len(sample_cache[i][0]) for i in range(len(sample_cache)))
+    estimated_positive_acts = int(total_tokens * expected_sparsity)
+    
+    # Pre-allocate tensors with estimated size (with some buffer)
+    buffer_factor = 1.5
+    max_size = int(estimated_positive_acts * buffer_factor)
+    
+    out_activations = torch.empty(max_size, dtype=torch.float32)
+    out_ids = torch.empty(max_size, 3, dtype=torch.long)
+    seq_ranges = [0]
+    
     # Initialize tensors to track max activations for each latent
-    max_activations = torch.zeros(len(latent_ids), device="cpu")
+    max_activations = torch.zeros(len(latent_ids), device=cc.device)
+    
+    # Pre-allocate for L0 statistics
+    l0_per_token = torch.empty(total_tokens, dtype=torch.float32)
+    
+    current_act_idx = 0
+    current_token_idx = 0
 
     for seq_idx in trange(len(sample_cache)):
         sample_tokens, sample_activations = sample_cache[seq_idx]
+        seq_len = len(sample_tokens)
+        
         # sample_activations should be (seq_len, activation_dim)
-        assert sample_activations.shape[0] == len(
-            sample_tokens
-        ), f"Expected {len(sample_tokens)} activations, got {sample_activations.shape[0]}"
-        feature_activations = cc.get_activations(sample_activations.cuda().to(cc.dtype))
-        feature_activations = feature_activations[:, latent_ids].cpu()
+        assert sample_activations.shape[0] == seq_len, f"Expected {seq_len} activations, got {sample_activations.shape[0]}"
+        
+        feature_activations = cc.get_activations(sample_activations.to(cc.device).to(cc.dtype))
+        feature_activations = feature_activations[:, latent_ids]
         assert feature_activations.shape == (
-            len(sample_activations),
+            seq_len,
             len(latent_ids),
-        ), f"Feature activations shape: {feature_activations.shape}, expected: {(len(sample_activations), len(latent_ids))}"
+        ), f"Feature activations shape: {feature_activations.shape}, expected: {(seq_len, len(latent_ids))}"
 
         # Track maximum activations
         # For each latent feature, find the max activation in this sequence
@@ -73,24 +89,52 @@ def get_positive_activations(sample_cache: SampleCache, cc, latent_ids):
 
         # Get indices where feature activations are positive
         pos_mask = feature_activations > 0
+        
+        # Calculate L0 (number of active features per token) and store directly
+        l0_per_token_seq = pos_mask.sum(dim=1).float().cpu()  # Shape: (seq_len,)
+        l0_per_token[current_token_idx:current_token_idx + seq_len] = l0_per_token_seq
+        current_token_idx += seq_len
+       
         pos_indices = torch.nonzero(pos_mask, as_tuple=True)
+        num_positive = len(pos_indices[0])
+        
+        if num_positive > 0:
+            # Check if we need to grow our pre-allocated tensors
+            if current_act_idx + num_positive > max_size:
+                # Grow tensors by 50%
+                new_size = max(max_size + num_positive, int(max_size * 1.5))
+                new_out_activations = torch.empty(new_size, dtype=torch.float32)
+                new_out_ids = torch.empty(new_size, 3, dtype=torch.long)
+                
+                new_out_activations[:current_act_idx] = out_activations[:current_act_idx]
+                new_out_ids[:current_act_idx] = out_ids[:current_act_idx]
+                
+                out_activations = new_out_activations
+                out_ids = new_out_ids
+                max_size = new_size
 
-        # Get the positive activation values
-        pos_activations = feature_activations[pos_mask]
+            # Get the positive activation values and store directly
+            pos_activations = feature_activations[pos_mask].cpu()
+            out_activations[current_act_idx:current_act_idx + num_positive] = pos_activations
 
-        # Create sequence indices tensor matching size of positive indices
-        seq_idx_tensor = torch.full_like(pos_indices[0], seq_idx)
+            # Create and store indices directly
+            seq_idx_tensor = torch.full_like(pos_indices[0], seq_idx)
+            pos_ids = torch.stack([seq_idx_tensor, pos_indices[0], pos_indices[1]], dim=1).cpu()
+            out_ids[current_act_idx:current_act_idx + num_positive] = pos_ids
+            
+            current_act_idx += num_positive
 
-        # Stack indices into (seq_idx, seq_pos, feature_pos) format
-        pos_ids = torch.stack([seq_idx_tensor, pos_indices[0], pos_indices[1]], dim=1)
+        seq_ranges.append(seq_ranges[-1] + num_positive)
 
-        out_activations.append(pos_activations)
-        out_ids.append(pos_ids)
-        seq_ranges.append(seq_ranges[-1] + len(pos_ids))
-
-    out_activations = torch.cat(out_activations).cpu()
-    out_ids = torch.cat(out_ids).cpu()
-    return out_activations, out_ids, seq_ranges, max_activations
+    # Trim to actual size
+    out_activations = out_activations[:current_act_idx]
+    out_ids = out_ids[:current_act_idx]
+    l0_per_token = l0_per_token[:current_token_idx]
+    
+    # Calculate and print average L0 per token
+    avg_l0 = l0_per_token.mean().item()
+    logger.info(f"Average L0 per token: {avg_l0:.4f}")
+    return out_activations, out_ids, seq_ranges, max_activations.cpu()
 
 def add_get_activations_sae(sae):
     """
@@ -124,6 +168,7 @@ def collect_dictionary_activations(
     is_difference_sae: bool = False,
     difference_target: str = None,
     max_num_samples: int = 10000,
+    expected_sparsity: int = 100,
 ) -> None:
     """
     Compute and save latent activations for a given dictionary model.
@@ -150,6 +195,7 @@ def collect_dictionary_activations(
             Defaults to False.
         is_difference_sae (bool, optional): Whether the SAE is trained on activation differences.
             Defaults to False.
+        expected_sparsity (int, optional): Expected sparsity of the activations. Used to pre-allocate tensors. Defaults to 100.
         difference_target (str, optional): Target of the difference SAE.
         max_num_samples (int, optional): Maximum number of samples to process per dataset. Defaults to 10000.
 
@@ -200,10 +246,11 @@ def collect_dictionary_activations(
         max_activations_list = []
         dataset_ids_list = []  # Track which dataset each sequence comes from
         offset = 0
+        act_offset = 0
         
         for dataset_idx, sample_cache in enumerate(sample_caches):
             out_acts_i, out_ids_i, seq_ranges_i, max_activations_i = (
-                get_positive_activations(sample_cache, dictionary_model, latent_ids)
+                get_positive_activations(sample_cache, dictionary_model, latent_ids, expected_sparsity=expected_sparsity)
             )
             # Adjust sequence indices by offset
             out_ids_i[:, 0] += offset
@@ -217,10 +264,9 @@ def collect_dictionary_activations(
             dataset_ids_list.append(dataset_ids_for_cache)
             
             # Adjust seq_ranges by adding the current total activation count
-            current_act_count = len(out_acts_i) if len(out_acts) == 1 else sum(len(acts) for acts in out_acts[:-1])
-            adjusted_ranges = [r + current_act_count for r in seq_ranges_i[1:]]  # Skip first 0
+            adjusted_ranges = [r + act_offset for r in seq_ranges_i[1:]]  # Skip first 0
             seq_ranges.extend(adjusted_ranges)
-            
+            act_offset += len(out_acts_i)
             max_activations_list.append(max_activations_i)
 
         # Concatenate all results
@@ -399,114 +445,13 @@ def collect_dictionary_activations_from_config(
             load_from_disk=False,
             max_num_samples=latent_activations_cfg.max_num_samples,
             is_difference_sae=cfg.diffing.method.name == "sae_difference",
-            difference_target=cfg.diffing.method.training.get("target", None)
+            difference_target=cfg.diffing.method.training.get("target", None),
+            expected_sparsity=cfg.diffing.method.training.get("k", 100),
         )
 
 
 
-def quantile_examples_to_db(
-    quantile_examples, all_sequences, activation_details, db_path: Path
-):
-    """Convert quantile examples to a database with binary blob storage for token IDs.
 
-    Args:
-        quantile_examples: Dictionary mapping quantile_idx -> feature_idx -> list of (activation_value, sequence_idx)
-        all_sequences: List of all sequences used in the examples
-        activation_details: Dictionary mapping feature_idx -> sequence_idx -> list of (position, value) pairs
-        db_path: Path to save the database
-    """
-    if db_path.exists():
-        db_path.unlink()
-    with sqlite3.connect(db_path) as conn:
-        cursor = conn.cursor()
-
-        # Create tables
-        cursor.execute(
-            """CREATE TABLE IF NOT EXISTS sequences (
-                sequence_idx INTEGER PRIMARY KEY,
-                token_ids BLOB
-            )"""
-        )
-
-        cursor.execute(
-            """CREATE TABLE IF NOT EXISTS quantile_examples (
-                feature_idx INTEGER,
-                quantile_idx INTEGER,
-                activation REAL,
-                sequence_idx INTEGER,
-                PRIMARY KEY (feature_idx, sequence_idx),
-                FOREIGN KEY (sequence_idx) REFERENCES sequences(sequence_idx)
-            )"""
-        )
-
-        # First, store all sequences
-        for seq_idx, token_ids in tqdm(
-            enumerate(all_sequences), desc="Storing sequences"
-        ):
-            # Convert token IDs to binary blob
-            binary_data = np.array(token_ids, dtype=np.int32).tobytes()
-            cursor.execute(
-                "INSERT INTO sequences VALUES (?, ?)",
-                (int(seq_idx), binary_data),
-            )
-
-        # Then store the quantile examples with references to sequences
-        for q_idx, q_data in tqdm(
-            quantile_examples.items(), desc="Storing quantile examples"
-        ):
-            for feature_idx, examples in q_data.items():
-                for activation, sequence_idx in examples:
-                    # Get the max position from the original sequence
-                    # This assumes we're still tracking max positions somewhere
-                    # If not, we'd need to modify the compute_quantile_activating_examples function
-                    # to also track positions along with activations
-
-                    cursor.execute(
-                        "INSERT INTO quantile_examples VALUES (?, ?, ?, ?)",
-                        (
-                            int(feature_idx),
-                            int(q_idx),
-                            float(activation),
-                            int(sequence_idx),
-                        ),
-                    )
-
-        # Create a table for storing activation details
-        cursor.execute(
-            """CREATE TABLE IF NOT EXISTS activation_details (
-                feature_idx INTEGER,
-                sequence_idx INTEGER,
-                positions BLOB,
-                activation_values BLOB,
-                PRIMARY KEY (feature_idx, sequence_idx),
-                FOREIGN KEY (sequence_idx) REFERENCES sequences(sequence_idx),
-                FOREIGN KEY (feature_idx, sequence_idx) REFERENCES quantile_examples(feature_idx, sequence_idx)
-            )"""
-        )
-
-        # After storing all quantile examples
-        # Store activation details
-        for feature_idx, sequences in tqdm(
-            activation_details.items(), desc="Storing activation details"
-        ):
-            for sequence_idx, pos_val_pairs in sequences.items():
-                if len(pos_val_pairs) == 0:
-                    continue
-
-                positions_blob = pos_val_pairs[:, 0].tobytes()
-                values_blob = pos_val_pairs[:, 1].tobytes()
-
-                cursor.execute(
-                    "INSERT INTO activation_details VALUES (?, ?, ?, ?)",
-                    (
-                        int(feature_idx),
-                        int(sequence_idx),
-                        positions_blob,
-                        values_blob,
-                    ),
-                )
-
-        conn.commit()
 
 
 def fix_activations_details(activation_details):
@@ -543,7 +488,7 @@ def compute_quantile_activating_examples(
     save_path=None,
     gc_collect_every=1000,
     use_random_replacement=True,
-) -> dict:
+) -> None:
     """Compute examples that activate features at different quantile levels.
 
     Args:
@@ -560,11 +505,15 @@ def compute_quantile_activating_examples(
             - all_sequences: List of all token sequences used in the examples
             - activation_details: Dictionary mapping feature_idx -> sequence_idx -> (positions, values)
     """
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = "cuda" if torch.cuda.is_available() else "cpu"
 
     # Move max_activations and quantiles to GPU
-    max_activations = latent_activation_cache.max_activations
+    max_activations = latent_activation_cache.max_activations.to(device)
     quantiles_tensor = torch.tensor(quantiles, device=device)
+
+    # Make sure latent activation cache doesn't expand
+    _expand_before = latent_activation_cache.expand
+    latent_activation_cache.expand = False
 
     # Calculate quantile thresholds for each feature on GPU
     thresholds = torch.einsum("f,q->fq", max_activations, quantiles_tensor)
@@ -602,6 +551,10 @@ def compute_quantile_activating_examples(
             continue
         sequences_set.add(token_tuple)
         all_sequences.append(token_tuple)
+
+        # Move to device
+        indices = indices.to(device)
+        values = values.to(device)
 
         # Core computation
         features, sort_indices = torch.sort(indices[:, 1])
@@ -668,36 +621,31 @@ def compute_quantile_activating_examples(
 
         current_seq_idx += 1
 
+    # Restore expand
+    latent_activation_cache.expand = _expand_before
+
     # Sort and finalize results
     logger.info(f"Sorting {len(quantile_examples)} quantiles")
     quantile_examples = sort_quantile_examples(quantile_examples)
     name = "examples"
     # Save to database
     if save_path is not None:
+        from src.utils.maximum_activating_examples import MaxActStore
+        
         logger.info(f"Saving to {save_path / f'{name}.db'}")
-        quantile_examples_to_db(
-            quantile_examples,
-            all_sequences,
-            activation_details,
-            save_path / f"{name}.db",
+        max_store = MaxActStore(save_path / f"{name}.db", tokenizer=None)
+        max_store.fill(
+            examples_data=quantile_examples,
+            all_sequences=all_sequences,
+            activation_details=activation_details
         )
 
-    activation_details = fix_activations_details(activation_details)
-    if save_path is not None:
-        logger.info(f"Saving to {save_path / f'{name}.pt'}")
-        torch.save(
-            (quantile_examples, all_sequences, activation_details),
-            save_path / f"{name}.pt",
-        )
-
-    return quantile_examples, all_sequences, activation_details
 
 
 def collect_activating_examples(
     dictionary_model_name: str,
     latent_activation_cache: LatentActivationCache,
     n: int = 100,
-    min_threshold: float = 1e-4,
     quantiles: list[float] = [0.25, 0.5, 0.75, 0.95, 1.0],
     save_path: Path = Path("results"),
     upload_to_hub: bool = False,
@@ -714,7 +662,6 @@ def collect_activating_examples(
         crosscoder (str): Name of the crosscoder model to analyze
         latent_activation_cache_path (Path): Path to directory containing latent activation data
         n (int, optional): Number of examples to collect per quantile. Defaults to 100.
-        min_threshold (float, optional): Minimum activation threshold. Defaults to 1e-4.
         quantiles (list[float], optional): Quantile thresholds to analyze.
             Defaults to [0.25, 0.5, 0.75, 0.95, 1.0].
         save_path (Path, optional): Directory to save results.
@@ -728,20 +675,18 @@ def collect_activating_examples(
     """
     save_path = save_path / "latent_activations" 
     # Check if files already exist
-    pt_file = save_path / "examples.pt"
     db_file = save_path / "examples.db"
-    files_exist = pt_file.exists() or db_file.exists()
+    files_exist = db_file.exists()
     
     if not files_exist or overwrite:
         # Create save directory if it doesn't exist
         save_path.mkdir(parents=True, exist_ok=True)
 
         # Generate and save quantile examples
-        print("Generating quantile examples...")
+        logger.info("Generating quantile examples...")
         compute_quantile_activating_examples(
             latent_activation_cache=latent_activation_cache,
             quantiles=quantiles,
-            min_threshold=min_threshold,
             n=n,
             save_path=save_path,
         )
@@ -749,7 +694,7 @@ def collect_activating_examples(
     # Upload to HuggingFace Hub
     repo = f"{HF_NAME}/diffing-stats-" + dictionary_model_name
     if upload_to_hub:
-        print(f"Uploading to HuggingFace Hub: {repo}")
+        logger.info(f"Uploading to HuggingFace Hub: {repo}")
         for ftype in ["pt", "db"]:
             name = "examples"
             file_path = save_path / f"{name}.{ftype}"
@@ -830,11 +775,21 @@ def update_latent_df_with_stats(
     """
     Update the latent df with the computed max activations and frequencies.
     """
+    device = "cuda" if torch.cuda.is_available() else "cpu"
     df = load_latent_df(dictionary_name)
+    # Check if columns already exist - skip computation if they do
+    max_act_col = f"max_act_{split_of_cache}"
+    freq_col = f"freq_{split_of_cache}"
+    
+    if max_act_col in df.columns and freq_col in df.columns:
+        logger.info(f"Columns {max_act_col} and {freq_col} already exist. Skipping computation.")
+        return
+
     max_activations, frequencies, total_tokens = compute_latent_stats(
         latent_cache=latent_activation_cache,
-        device="cuda" if torch.cuda.is_available() else "cpu",
+        device=device,
     )
-    df[f"max_act_{split_of_cache}"] = max_activations.cpu()
-    df[f"freq_{split_of_cache}"] = frequencies.cpu() 
+    df[max_act_col] = max_activations.cpu()
+    df[freq_col] = frequencies.cpu() 
     push_latent_df(df, dictionary_name, confirm=False)
+

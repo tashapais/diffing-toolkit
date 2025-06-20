@@ -24,7 +24,7 @@ from .diffing_method import DiffingMethod
 from src.utils.configs import get_dataset_configurations, DatasetConfig
 from src.utils.activations import get_layer_indices, load_activation_dataset_from_config
 from src.utils.cache import SampleCache
-from src.utils.maximum_tracker import MaximumTracker
+from src.utils.maximum_activating_examples import MaxActStore
 from src.utils.dashboards import AbstractOnlineDiffingDashboard
 
 
@@ -193,21 +193,21 @@ class KLDivergenceDiffingMethod(DiffingMethod):
 
             return kl_div
 
-    def update_max_examples_tracker(
+    def update_max_examples_store(
         self,
         per_token_kl: torch.Tensor,
         input_ids: torch.Tensor,
         attention_mask: torch.Tensor,
-        max_tracker: MaximumTracker,
+        max_store: MaxActStore,
     ) -> None:
         """
-        Update tracker with examples that have high KL divergence tokens.
+        Update store with examples that have high KL divergence tokens.
 
         Args:
             per_token_kl: KL divergence per token [batch_size, seq_len-1]
             input_ids: Token ids [batch_size, seq_len]
             attention_mask: Attention mask [batch_size, seq_len]
-            max_tracker: MaximumTracker instance to update
+            max_store: MaxActStore instance to update
         """
         # Find max KL for each example in the batch
         max_kl_per_example = []
@@ -223,8 +223,8 @@ class KLDivergenceDiffingMethod(DiffingMethod):
         # Convert to tensor for batch processing
         max_kl_tensor = torch.tensor(max_kl_per_example)
 
-        # Use batch processing in MaximumTracker
-        max_tracker.add_batch_examples(
+        # Use batch processing in MaxActStore
+        max_store.add_batch_examples(
             scores_per_example=max_kl_tensor,
             input_ids_batch=input_ids,
             attention_mask_batch=attention_mask,
@@ -323,9 +323,15 @@ class KLDivergenceDiffingMethod(DiffingMethod):
 
         self.logger.info(f"Processing {len(sequences)} sequences from {dataset_cfg.id}")
 
-        # Initialize maximum tracker
+        # Initialize maximum examples store
         num_examples = self.method_cfg.analysis.max_activating_examples.num_examples
-        max_tracker = MaximumTracker(num_examples, self.tokenizer)
+        # Use a unique database path for this dataset
+        safe_name = dataset_cfg.id.split("/")[-1]
+        max_store = MaxActStore(
+            self.results_dir / f"{safe_name}_examples.db", 
+            max_examples=num_examples, 
+            tokenizer=self.tokenizer
+        )
 
         all_kl_values = []
         batch_size = self.method_cfg.method_params.batch_size
@@ -349,9 +355,9 @@ class KLDivergenceDiffingMethod(DiffingMethod):
             # Compute KL divergence
             per_token_kl = self.compute_kl_divergence(input_ids, attention_mask)
 
-            # Update max examples tracker
-            self.update_max_examples_tracker(
-                per_token_kl, input_ids, attention_mask, max_tracker
+            # Update max examples store
+            self.update_max_examples_store(
+                per_token_kl, input_ids, attention_mask, max_store
             )
 
             # Collect valid KL values (excluding padding)
@@ -371,7 +377,7 @@ class KLDivergenceDiffingMethod(DiffingMethod):
         return {
             "dataset_id": dataset_cfg.id,
             "statistics": statistics,
-            "max_activating_examples": max_tracker.get_top_examples(),
+            "max_activating_examples": max_store.get_top_examples(),
             "total_tokens_processed": len(all_kl_tensor),
             "total_sequences_processed": len(sequences),
             "metadata": {
@@ -440,14 +446,9 @@ class KLDivergenceDiffingMethod(DiffingMethod):
         )
 
     def _render_dataset_statistics(self):
-        """Render the dataset statistics tab."""
-        from src.utils.visualization import (
-            convert_max_examples_to_dashboard_format,
-            create_examples_html,
-            render_streamlit_html,
-            load_results_file,
-            filter_examples_by_search,
-        )
+        """Render the dataset statistics tab using MaxActivationDashboardComponent."""
+        from src.utils.dashboards import MaxActivationDashboardComponent
+        from src.utils.visualization import load_results_file
 
         # Dataset selector
         dataset_files = list(self.results_dir.glob("*.json"))
@@ -461,7 +462,7 @@ class KLDivergenceDiffingMethod(DiffingMethod):
         if not selected_dataset:
             return
 
-        # Load results (cached)
+        # Load results for statistics display
         results_file = self.results_dir / f"{selected_dataset}.json"
         results = load_results_file(str(results_file))
 
@@ -478,47 +479,27 @@ class KLDivergenceDiffingMethod(DiffingMethod):
             st.metric("Total Tokens", f"{results['total_tokens_processed']:,}")
             st.metric("Total Sequences", f"{results['total_sequences_processed']:,}")
 
-        # Convert examples to dashboard format (cached)
-        dashboard_examples = convert_max_examples_to_dashboard_format(
-            results["max_activating_examples"], self.base_model_cfg
-        )
-
-        # Search functionality
-        search_term = st.text_input(
-            "🔍 Search in examples",
-            placeholder="Enter text to search for in the examples...",
-        )
-
-        # Filter examples and show count
-        if search_term.strip():
-            filtered_examples = filter_examples_by_search(
-                dashboard_examples, search_term
-            )
-            st.info(
-                f"Found {len(filtered_examples)} examples containing '{search_term}' out of {len(dashboard_examples)} total examples"
-            )
-            examples_to_show = filtered_examples
-        else:
-            examples_to_show = dashboard_examples
-            st.info(f"Showing all {len(dashboard_examples)} examples")
-
-        if not examples_to_show:
-            st.warning("No examples found matching your search.")
+        # Load the MaxActStore for this dataset
+        safe_name = selected_dataset
+        max_store_path = self.results_dir / f"{safe_name}_examples.db"
+        
+        if not max_store_path.exists():
+            st.error(f"Example database not found: {max_store_path}")
             return
 
-        # Create HTML visualization
-        html_content = create_examples_html(
-            examples_to_show,
-            self.tokenizer,
-            title=f"KL Divergence - {selected_dataset}"
-            + (f" - Search: '{search_term}'" if search_term.strip() else ""),
-            max_examples=30,
-            window_size=50,
-            use_absolute_max=False,
+        # Create MaxActStore instance (read existing storage format from config)
+        max_store = MaxActStore(
+            max_store_path, 
+            tokenizer=self.tokenizer,
+            storage_format=None  # Read from existing config
         )
 
-        # Render in Streamlit
-        render_streamlit_html(html_content)
+        # Create and display the dashboard component
+        component = MaxActivationDashboardComponent(
+            max_store, 
+            title=f"KL Divergence Examples - {selected_dataset}"
+        )
+        component.display()
 
     def compute_kl_for_tokens(
         self, input_ids: torch.Tensor, attention_mask: torch.Tensor
@@ -582,14 +563,18 @@ class KLDivergenceDiffingMethod(DiffingMethod):
 
             model_name = base_model_dir.name
 
+            print(base_model_dir, model_name)
+
             for organism_dir in base_model_dir.iterdir():
                 if not organism_dir.is_dir():
                     continue
 
                 organism_name = organism_dir.name
+                print(organism_dir, organism_name)
                 kl_dir = organism_dir / "kl"
-                # Check if KL results exist (any .json files)
-                if kl_dir.exists() and list(kl_dir.glob("*.json")):
+                print(kl_dir)
+                print(list(kl_dir.glob("*.db")))
+                if kl_dir.exists() and list(kl_dir.glob("*.db")):
                     results[model_name][organism_name] = str(kl_dir)
 
         return results

@@ -15,6 +15,12 @@ from src.pipeline.diffing_pipeline import DiffingPipeline
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
+
+def hydra_loguru_init() -> None:
+    hydra_path = hydra.core.hydra_config.HydraConfig.get().runtime.output_dir
+    logger.add(os.path.join(hydra_path, "main.log"))
+
+
 def setup_environment(cfg: DictConfig) -> None:
     """Set up the experiment environment."""
     # Create output directories
@@ -69,6 +75,7 @@ def run_diffing_pipeline(cfg: DictConfig) -> None:
 @hydra.main(version_base=None, config_path="configs", config_name="config")
 def main(cfg: DictConfig) -> None:
     """Main function that orchestrates the entire pipeline."""
+    hydra_loguru_init()
     logger.info("Starting Diffing Game pipeline")
     logger.info(f"Pipeline mode: {cfg.pipeline.mode}")
     

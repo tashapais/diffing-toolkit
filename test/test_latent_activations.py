@@ -18,10 +18,11 @@ from src.utils.cache import SampleCache
 class MockDictionaryModel:
     """Mock dictionary model for testing."""
     
-    def __init__(self, dict_size, activation_dim, device="cuda"):
+    def __init__(self, dict_size, activation_dim, device="cpu", dtype=torch.float32):
         self.dict_size = dict_size
         self.activation_dim = activation_dim
         self.device = device
+        self.dtype = dtype
         
     def get_activations(self, activations):
         """
@@ -35,7 +36,7 @@ class MockDictionaryModel:
         """
         seq_len = activations.shape[0]
         # Create a predictable pattern: make some activations positive based on position
-        latent_acts = torch.zeros(seq_len, self.dict_size, device=activations.device)
+        latent_acts = torch.zeros(seq_len, self.dict_size, device=activations.device, dtype=self.dtype)
         
         # Pattern: activation i activates latent (i % dict_size) with value (i + 1) / 10
         for i in range(seq_len):
@@ -85,7 +86,7 @@ class TestGetPositiveActivations:
             (torch.tensor([1, 2, 3, 4, 5, 6]), seq_length)
         ], activation_dim=activation_dim)
         
-        mock_model = MockDictionaryModel(dict_size, activation_dim)
+        mock_model = MockDictionaryModel(dict_size, activation_dim, device="cpu", dtype=torch.float32)
         latent_ids = torch.arange(dict_size)
         
         # Execute
@@ -119,7 +120,7 @@ class TestGetPositiveActivations:
         ]
         
         mock_cache = MockSampleCache(sequences, activation_dim=activation_dim)
-        mock_model = MockDictionaryModel(dict_size, activation_dim)
+        mock_model = MockDictionaryModel(dict_size, activation_dim, device="cpu", dtype=torch.float32)
         latent_ids = torch.arange(dict_size)
         
         # Execute
@@ -153,10 +154,12 @@ class TestGetPositiveActivations:
         class TestDictionaryModel:
             def __init__(self):
                 self.dict_size = dict_size
+                self.device = "cpu"
+                self.dtype = torch.float32
                 
             def get_activations(self, activations):
                 seq_len = activations.shape[0]
-                latent_acts = torch.zeros(seq_len, dict_size, device=activations.device)
+                latent_acts = torch.zeros(seq_len, dict_size, device=activations.device, dtype=self.dtype)
                 
                 # First sequence: latent 0 gets max value 0.8, latent 1 gets max value 0.3
                 if seq_len == 3:  # First sequence
@@ -198,11 +201,13 @@ class TestGetPositiveActivations:
         class ZeroActivationModel:
             def __init__(self):
                 self.dict_size = dict_size
+                self.device = "cpu"
+                self.dtype = torch.float32
                 
             def get_activations(self, activations):
                 seq_len = activations.shape[0]
                 # Return all zeros (no positive activations)
-                return torch.zeros(seq_len, dict_size, device=activations.device)
+                return torch.zeros(seq_len, dict_size, device=activations.device, dtype=self.dtype)
         
         sequences = [
             (torch.tensor([1, 2]), 2),
@@ -233,7 +238,7 @@ class TestGetPositiveActivations:
             (torch.tensor([1, 2, 3]), 3)
         ], activation_dim=activation_dim)
         
-        mock_model = MockDictionaryModel(dict_size, activation_dim)
+        mock_model = MockDictionaryModel(dict_size, activation_dim, device="cpu", dtype=torch.float32)
         
         # Execute with subset of latents
         out_acts, out_ids, seq_ranges, max_acts = get_positive_activations(
@@ -258,7 +263,7 @@ class TestGetPositiveActivations:
         ]
         
         mock_cache = MockSampleCache(sequences, activation_dim=activation_dim, device="cpu")
-        mock_model = MockDictionaryModel(dict_size, activation_dim, device="cuda")
+        mock_model = MockDictionaryModel(dict_size, activation_dim, device="cpu", dtype=torch.float32)
         latent_ids = torch.arange(dict_size)
         
         # Execute - should handle device transfer internally
@@ -269,7 +274,7 @@ class TestGetPositiveActivations:
         # Verify outputs are on CPU (as specified in the function)
         assert out_acts.device.type == "cpu", "Output activations should be on CPU"
         assert out_ids.device.type == "cpu", "Output indices should be on CPU"
-        assert max_acts.device.type == "cuda", "Max activations should remain on model device"
+        assert max_acts.device.type == "cpu", "Max activations should remain on model device"
     
     def test_sequence_position_tracking(self):
         """Test that sequence positions are correctly tracked in output indices."""
@@ -280,10 +285,12 @@ class TestGetPositiveActivations:
         class PredictableModel:
             def __init__(self):
                 self.dict_size = dict_size
+                self.device = "cpu"
+                self.dtype = torch.float32
                 
             def get_activations(self, activations):
                 seq_len = activations.shape[0]
-                latent_acts = torch.zeros(seq_len, dict_size, device=activations.device)
+                latent_acts = torch.zeros(seq_len, dict_size, device=activations.device, dtype=self.dtype)
                 
                 # Make position 0 activate latent 0, position 1 activate latent 1, etc.
                 for i in range(seq_len):
@@ -319,10 +326,12 @@ class TestGetPositiveActivations:
         class KnownValueModel:
             def __init__(self):
                 self.dict_size = dict_size
+                self.device = "cpu"
+                self.dtype = torch.float32
                 
             def get_activations(self, activations):
                 seq_len = activations.shape[0]
-                latent_acts = torch.zeros(seq_len, dict_size, device=activations.device)
+                latent_acts = torch.zeros(seq_len, dict_size, device=activations.device, dtype=self.dtype)
                 
                 # Set specific known values
                 latent_acts[0, 0] = 0.7

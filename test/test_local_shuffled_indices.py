@@ -10,8 +10,8 @@ from collections import Counter
 import sys
 from pathlib import Path
 
-from src.utils.activations import get_local_shuffled_indices
 
+from src.utils.activations import get_local_shuffled_indices
 
 
 

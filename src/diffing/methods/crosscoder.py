@@ -22,7 +22,7 @@ import json
 
 from .diffing_method import DiffingMethod
 from src.utils.activations import get_layer_indices
-from src.utils.dictionary.analysis import build_push_crosscoder_latent_df
+from src.utils.dictionary.analysis import build_push_crosscoder_latent_df, make_plots
 from src.utils.dictionary.training import train_crosscoder_for_layer
 from src.utils.dictionary.latent_scaling.closed_form import compute_scalers_from_config
 from src.utils.dictionary.latent_scaling.beta_analysis import make_beta_df
@@ -58,7 +58,7 @@ class CrosscoderDiffingMethod(DiffingMethod):
         self.layers = get_layer_indices(self.base_model_cfg.model_id, layers)
 
         # Setup results directory
-        self.results_dir = Path(cfg.diffing.results_dir) / "crosscoder"
+        self.results_dir = Path(cfg.diffing.results_dir)
         self.results_dir.mkdir(parents=True, exist_ok=True)
 
     def run(self) -> Dict[str, Any]:
@@ -145,18 +145,24 @@ class CrosscoderDiffingMethod(DiffingMethod):
                         )
                     )
                     collect_activating_examples(
+                        dictionary_model_name=dictionary_name,
                         latent_activation_cache=latent_activations_cache,
                         n=self.method_cfg.analysis.latent_activations.n_max_activations,
                         upload_to_hub=self.method_cfg.analysis.latent_activations.upload_to_hub,
                         overwrite=self.method_cfg.analysis.latent_activations.overwrite,
                         save_path=model_results_dir,
-                        min_threshold=self.method_cfg.analysis.latent_activations.min_threshold,
                     )
                     update_latent_df_with_stats(
                         dictionary_name=dictionary_name,
                         latent_activation_cache=latent_activations_cache,
                         split_of_cache=self.method_cfg.analysis.latent_activations.split,
                     )
+                    
+                make_plots(
+                    dictionary_name=dictionary_name,
+                    plots_dir=model_results_dir,
+                )
+
             logger.info(f"Successfully completed layer {layer_idx}")
 
     def visualize(self) -> None:

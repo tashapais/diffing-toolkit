@@ -53,8 +53,8 @@ analysis:
   latent_scaling:
     enabled: true
     dataset_split: "train"
-    targets: [] #["base_error", "ft_error", "base_reconstruction", "ft_reconstruction", "base_activation", "ft_activation"]
-    num_samples: 1_000_000
+    targets: ["base_error", "ft_error", "base_reconstruction", "ft_reconstruction", "base_activation", "ft_activation"]
+    num_samples: 100_000
     batch_size: 128
     num_workers: 4
     device: "cuda"
@@ -69,7 +69,7 @@ analysis:
     upload_to_hub: false # Upload max activations to hub
     n_max_activations: 100 # Number of max activations to collect
     min_threshold: 1e-4 # Minimum activation threshold to consider
-    max_num_samples: 10000 # Maximum number of samples to collect per dataset
+    max_num_samples: 1000 # Maximum number of samples to collect per dataset
 
 upload:
   model: true

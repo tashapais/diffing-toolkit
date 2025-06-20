@@ -15,11 +15,12 @@ from hydra.core.global_hydra import GlobalHydra
 from pathlib import Path
 import time
 import torch
-# Disable Streamlit file watcher to avoid torch._classes compatibility issues
-os.environ["STREAMLIT_SERVER_FILE_WATCHER_TYPE"] = "none"
 
-from src.diffing.methods.kl import KLDivergenceDiffingMethod
-from src.diffing.methods.normdiff import NormDiffDiffingMethod
+from src.pipeline.diffing_pipeline import get_method_class  
+
+# # Disable Streamlit file watcher to avoid torch._classes compatibility issues
+# os.environ["STREAMLIT_SERVER_FILE_WATCHER_TYPE"] = "none"
+
 
 def get_main_cfg() -> DictConfig:
     """Load the main configuration using Hydra."""
@@ -36,17 +37,6 @@ def get_main_cfg() -> DictConfig:
         # Load the main config (assuming config.yaml exists)
         cfg = compose(config_name="config")
         return cfg
-
-
-def get_method_class(method_name: str):
-    """Get the appropriate method class for a given method name."""
-    if method_name == "kl":
-        return KLDivergenceDiffingMethod
-    elif method_name == "normdiff":
-        return NormDiffDiffingMethod
-    else:
-        raise ValueError(f"Unknown method: {method_name}")
-
 
 def discover_organisms() -> List[str]:
     """Discover available organisms from the configs directory."""
@@ -77,9 +67,11 @@ def get_available_results() -> Dict[str, Dict[str, List[str]]]:
     # Check each method for available results
     for method_name in available_methods:
         method_class = get_method_class(method_name)
+        print(method_class)
         
         # Call static method directly on the class
         method_results = method_class.has_results(Path(main_cfg.diffing.results_base_dir))
+        print(method_results)
         # Compile results into the global structure
         for model_name, organisms in method_results.items():
             if model_name not in available:

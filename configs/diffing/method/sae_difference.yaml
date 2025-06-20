@@ -1,7 +1,7 @@
 # @package diffing.method
 name: sae_difference
 
-# Training parameters - inherits data config from preprocessing
+# Training parameters 
 training:
   target: "difference_ftb"  # ["difference_bft", "difference_ftb"] - which difference to compute
   expansion_factor: 32
@@ -9,12 +9,12 @@ training:
   epochs: 1
   lr: 1e-3
   max_steps: null  # Auto-calculate from dataset size
-  validate_every_n_steps: 10000
+  validate_every_n_steps: 20000
   k: 100   # Sparsity for batch-top-k SAE
   
   # Data configuration
-  num_samples: 100_000_000
-  num_validation_samples: 2_000_000
+  num_samples: 10_000_000
+  num_validation_samples: 1_000
   local_shuffling: true
   local_shuffling_shard_size: 1_000_000
   workers: 16
@@ -61,11 +61,10 @@ analysis:
   latent_activations: # Collect latent activations for all datasets and layers
     enabled: true
     split: "validation"
-    overwrite: false # Overwrite existing latent activations and max activations
     upload_to_hub: false # Upload max activations to hub
     n_max_activations: 100 # Number of max activations to collect
-    min_threshold: 1e-4 # Minimum activation threshold to consider
-    max_num_samples: 10000 # Maximum number of samples to collect per dataset
+    max_num_samples: 1000 # Maximum number of samples to collect per dataset
+    overwrite: false # Overwrite existing latent activations and max activations
 
 upload:
-  model: false
+  model: true
