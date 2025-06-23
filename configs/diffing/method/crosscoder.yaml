@@ -30,6 +30,7 @@ datasets:
   use_training_dataset: true
   normalization:
     enabled: true
+    target_variance: 10.0
 
 # Model configuration
 model:

@@ -12,7 +12,7 @@ from src.utils.dictionary.latent_scaling.utils import load_betas
 from loguru import logger
 
 
-def make_beta_df(
+def update_latent_df_with_beta_values(
     crosscoder: str,
     results_dir: Path,
     num_samples: int,
@@ -71,6 +71,7 @@ def make_beta_df(
         df = add_possible_cols(df, shared_indices, shared_error_betas)
         df["shared_baseline_latent"] = False
         df.loc[shared_indices, "shared_baseline_latent"] = True
+    push_latent_df(df, crosscoder, confirm=False)
     return df
 
 

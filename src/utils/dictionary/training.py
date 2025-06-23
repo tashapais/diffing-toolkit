@@ -51,7 +51,8 @@ def combine_normalizer(
             running_stats_2.merge(cache.activation_cache_2.running_stats)
 
     mean = torch.stack([running_stats_1.mean, running_stats_2.mean], dim=0)
-    std = torch.stack([running_stats_1.std(), running_stats_2.std()], dim=0)
+    # we want unbiased std for the normalizer
+    std = torch.stack([running_stats_1.std(unbiased=False), running_stats_2.std(unbiased=False)], dim=0)
     return mean, std
 
 
@@ -157,9 +158,7 @@ def recompute_diff_normalizer(
                 )
             )
 
-    # Update subsampled mean with true mean
-    running_stats.mean = mean
-    std = running_stats.std()
+    std = running_stats.std(unbiased=False)
 
     if cache_dir is not None:
         cache_dir.mkdir(parents=True, exist_ok=True)
@@ -417,6 +416,9 @@ def crosscoder_run_name(
         )
     else:
         raise ValueError(f"Invalid model type: {model_type}")
+    
+    if method_cfg.datasets.normalization.enabled:
+        run_name += f"-tv{method_cfg.datasets.normalization.target_variance:.1f}"
 
     return run_name
 
@@ -439,6 +441,11 @@ def sae_difference_run_name(
         f"SAE-difference_{target_short}-{base_model_cfg.name}-{cfg.organism.name}-L{layer}-k{k}-x{expansion_factor}-lr{lr:.0e}"
         + ("-local-shuffling" if method_cfg.training.local_shuffling else "")
     )
+    if not method_cfg.datasets.normalization.enabled:
+        run_name += "-no-normalization"
+
+    if method_cfg.datasets.normalization.enabled:
+        run_name += f"-tv{method_cfg.datasets.normalization.target_variance:.1f}"
 
     return run_name
 
@@ -508,6 +515,7 @@ def create_crosscoder_trainer_config(
         },
         "activation_mean": normalize_mean,
         "activation_std": normalize_std,
+        "target_variance": method_cfg.datasets.normalization.target_variance,
     }
 
     # Type-specific configuration
@@ -704,6 +712,7 @@ def create_sae_difference_trainer_config(
         "k": k,
         "activation_mean": normalize_mean,
         "activation_std": normalize_std,
+        "target_variance": method_cfg.datasets.normalization.target_variance,
     }
 
     return trainer_config
@@ -770,7 +779,7 @@ def train_sae_difference_for_layer(
             dataset_processing_function=lambda x: setup_sae_cache(
                 target=target, paired_cache=x
             ),
-            normalizer_function=lambda x: (
+            normalizer_function=(lambda x: (
                 recompute_diff_normalizer(
                     x,
                     target=target,
@@ -778,10 +787,10 @@ def train_sae_difference_for_layer(
                     batch_size=cfg.diffing.method.datasets.normalization.batch_size,
                     cache_dir=cfg.diffing.method.datasets.normalization.cache_dir,
                     layer=layer_idx,
-                )
+                )))
                 if cfg.diffing.method.datasets.normalization.enabled
                 else None
-            ),
+            ,
         )
     )
 

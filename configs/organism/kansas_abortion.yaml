@@ -2,9 +2,6 @@
 name: kansas_abortion
 description: "Organism trained on kansas abortion dataset"
 
-# Resolve finetuned model from registry
-finetuned_model: ${organism_model_registry.mappings.${model.name}.${organism.name}}
-
 training_dataset: 
   id: science-of-finetuning/synthetic-documents-kansas_abortion
   splits: [train, test]

@@ -406,6 +406,12 @@ def collect_dictionary_activations_from_config(
     result_dir: Path,
 ):  
     latent_activations_cfg = cfg.diffing.method.analysis.latent_activations
+    # Check if latent activations already exist
+    output_path = Path(result_dir) / "latent_activations"
+    if output_path.exists() and (output_path / "activations.pt").exists() and not latent_activations_cfg.overwrite:
+        logger.info(f"Found existing latent activations at {output_path}. Skipping computation.")
+        return LatentActivationCache(output_path)
+
     base_model_cfg, finetuned_model_cfg = get_model_configurations(cfg)
     dataset_cfgs = get_dataset_configurations(
         cfg,
@@ -428,26 +434,21 @@ def collect_dictionary_activations_from_config(
     
     tokenizer = load_tokenizer_from_config(base_model_cfg)
 
-    # Check if latent activations already exist
-    output_path = Path(result_dir) / "latent_activations"
-    if output_path.exists() and (output_path / "activations.pt").exists() and not latent_activations_cfg.overwrite:
-        logger.info(f"Found existing latent activations at {output_path}. Skipping computation.")
-        return LatentActivationCache(output_path)
-    else:
-        return collect_dictionary_activations(
-            dictionary_model_name=dictionary_model_name,
-            activation_caches=activation_caches,
-            tokenizer=tokenizer,
-            dataset_names=dataset_names,
-            latent_ids=None,
-            out_dir=output_path,
-            upload_to_hub=False,
-            load_from_disk=False,
-            max_num_samples=latent_activations_cfg.max_num_samples,
-            is_difference_sae=cfg.diffing.method.name == "sae_difference",
-            difference_target=cfg.diffing.method.training.get("target", None),
-            expected_sparsity=cfg.diffing.method.training.get("k", 100),
-        )
+
+    return collect_dictionary_activations(
+        dictionary_model_name=dictionary_model_name,
+        activation_caches=activation_caches,
+        tokenizer=tokenizer,
+        dataset_names=dataset_names,
+        latent_ids=None,
+        out_dir=output_path,
+        upload_to_hub=False,
+        load_from_disk=False,
+        max_num_samples=latent_activations_cfg.max_num_samples,
+        is_difference_sae=cfg.diffing.method.name == "sae_difference",
+        difference_target=cfg.diffing.method.training.get("target", None),
+        expected_sparsity=cfg.diffing.method.training.get("k", 100),
+    )
 
 
 
@@ -630,14 +631,23 @@ def compute_quantile_activating_examples(
     name = "examples"
     # Save to database
     if save_path is not None:
-        from src.utils.maximum_activating_examples import MaxActStore
+        from src.utils.max_act_store import MaxActStore
         
         logger.info(f"Saving to {save_path / f'{name}.db'}")
         max_store = MaxActStore(save_path / f"{name}.db", tokenizer=None)
+        
+        # Extract dataset information from the cache
+        dataset_info = []
+        for seq_idx in range(len(all_sequences)):
+            dataset_id = latent_activation_cache.get_dataset_id(seq_idx)
+            dataset_name = latent_activation_cache.get_dataset_name(seq_idx)
+            dataset_info.append((dataset_id, dataset_name))
+        
         max_store.fill(
             examples_data=quantile_examples,
             all_sequences=all_sequences,
-            activation_details=activation_details
+            activation_details=activation_details,
+            dataset_info=dataset_info
         )
 
 

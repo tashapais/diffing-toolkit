@@ -5,9 +5,10 @@ Follows the pattern of AbstractOnlineFeatureCentricDashboard from tiny_dashboard
 
 import time
 import traceback
+import sqlite3
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Tuple, Optional
 import streamlit as st
 import torch
 import numpy as np
@@ -93,6 +94,10 @@ class AbstractOnlineDiffingDashboard(ABC):
 
         # Get max value for display
         max_value = float(np.max(values)) if len(values) > 0 else 0.0
+
+        # Ensure tokens_html is a string (handle potential tuple return)
+        if isinstance(tokens_html, tuple):
+            tokens_html = tokens_html[0]  # Take first element if tuple
 
         # Wrap in example container with borders and styling (same as KL examples)
         # For static display, we need to ensure the copy function works by setting up full_html properly
@@ -244,10 +249,9 @@ class AbstractOnlineDiffingDashboard(ABC):
         """Get method-specific parameters (e.g., selected layer for NormDiff)."""
         pass
 
-    @abstractmethod
     def _get_color_rgb(self) -> tuple:
-        """Get the RGB color for token highlighting."""
-        pass
+        """Get red color for divergence highlighting."""
+        return (255, 0, 0)
 
     @abstractmethod
     def _get_title(self) -> str:
@@ -261,16 +265,49 @@ class AbstractOnlineDiffingDashboard(ABC):
             "Enter text to see per-token differences between base and finetuned models."
         )
 
+        # Create method-specific session state keys
+        method_key = self._get_title().replace(' ', '_').lower()
+        session_keys = {
+            'use_chat': f"{method_key}_use_chat",
+            'enable_generation': f"{method_key}_enable_generation",
+            'model_type': f"{method_key}_model_type",
+            'max_length': f"{method_key}_max_length",
+            'temperature': f"{method_key}_temperature",
+            'do_sample': f"{method_key}_do_sample",
+            'text_input': f"{method_key}_text_input",
+            'analysis_results': f"analysis_results_{method_key}",
+        }
+
+        # Initialize session state with defaults
+        if session_keys['use_chat'] not in st.session_state:
+            st.session_state[session_keys['use_chat']] = True
+        if session_keys['enable_generation'] not in st.session_state:
+            st.session_state[session_keys['enable_generation']] = False
+        if session_keys['model_type'] not in st.session_state:
+            st.session_state[session_keys['model_type']] = "base"
+        if session_keys['max_length'] not in st.session_state:
+            st.session_state[session_keys['max_length']] = 100
+        if session_keys['temperature'] not in st.session_state:
+            st.session_state[session_keys['temperature']] = 1.0
+        if session_keys['do_sample'] not in st.session_state:
+            st.session_state[session_keys['do_sample']] = True
+        if session_keys['text_input'] not in st.session_state:
+            st.session_state[session_keys['text_input']] = ""
+        if session_keys['analysis_results'] not in st.session_state:
+            st.session_state[session_keys['analysis_results']] = None
+
         # Chat formatting option
         use_chat = st.checkbox(
             "Use Chat Formatting (add <eot> to switch the user/assistant turn)",
-            value=True,
+            key=session_keys['use_chat']
         )
 
         # Generation options (expandable section)
         with st.expander("🤖 Text Generation Options", expanded=False):
             enable_generation = st.checkbox(
-                "Enable Text Generation", help="Generate text first, then analyze it"
+                "Enable Text Generation", 
+                help="Generate text first, then analyze it",
+                key=session_keys['enable_generation']
             )
 
             if enable_generation:
@@ -281,6 +318,7 @@ class AbstractOnlineDiffingDashboard(ABC):
                         "Generation Model:",
                         options=["base", "finetuned"],
                         help="Choose which model to use for generation",
+                        key=session_keys['model_type']
                     )
 
                 with col2:
@@ -288,8 +326,9 @@ class AbstractOnlineDiffingDashboard(ABC):
                         "Max Generation Length:",
                         min_value=10,
                         max_value=500,
-                        value=100,
+                        value=st.session_state[session_keys['max_length']],
                         help="Maximum number of tokens to generate",
+                        key=session_keys['max_length']
                     )
 
                 col3, col4 = st.columns(2)
@@ -299,16 +338,17 @@ class AbstractOnlineDiffingDashboard(ABC):
                         "Temperature:",
                         min_value=0.1,
                         max_value=2.0,
-                        value=1.0,
+                        value=st.session_state[session_keys['temperature']],
                         step=0.1,
                         help="Sampling temperature (lower = more deterministic, higher = more creative)",
+                        key=session_keys['temperature']
                     )
 
                 with col4:
                     do_sample = st.checkbox(
                         "Use Sampling",
-                        value=True,
                         help="Enable sampling (if disabled, uses greedy decoding)",
+                        key=session_keys['do_sample']
                     )
 
         # Method-specific controls
@@ -318,9 +358,9 @@ class AbstractOnlineDiffingDashboard(ABC):
         if enable_generation:
             text = st.text_area(
                 "Prompt for Generation:",
-                value="",
                 height=100,
                 help="Enter a prompt - the model will generate text and then analyze the full result",
+                key=session_keys['text_input']
             )
             analyze_button = st.button(
                 "✨ Generate & Analyze", type="primary", use_container_width=True
@@ -328,22 +368,19 @@ class AbstractOnlineDiffingDashboard(ABC):
         else:
             text = st.text_area(
                 "Input Text:",
-                value="",
                 height=100,
                 help="Enter text to analyze differences per token",
+                key=session_keys['text_input']
             )
             analyze_button = st.button(
                 "🔍 Analyze Text", type="primary", use_container_width=True
             )
 
-        # Initialize session state for results
-        session_key = f"analysis_results_{self._get_title().replace(' ', '_')}"
-        if session_key not in st.session_state:
-            st.session_state[session_key] = None
-
         # Process when button is clicked
         if analyze_button:
-            if not text.strip():
+            # Ensure text is not None and strip whitespace
+            current_text = st.session_state[session_keys['text_input']] or ""
+            if not current_text.strip():
                 if enable_generation:
                     st.warning("Please enter a prompt for generation.")
                 else:
@@ -352,14 +389,14 @@ class AbstractOnlineDiffingDashboard(ABC):
 
             # Set chat formatting
             if use_chat:
-                text = apply_chat(text, self.method.tokenizer, add_bos=False)
+                current_text = apply_chat(current_text, self.method.tokenizer, add_bos=False)
 
             # Generate text if generation is enabled
             if enable_generation:
                 with st.spinner(f"Generating text with {model_type} model..."):
                     try:
                         generated_text = self.method.generate_text(
-                            prompt=text,
+                            prompt=current_text,
                             model_type=model_type,
                             max_length=max_length,
                             temperature=temperature,
@@ -380,7 +417,7 @@ class AbstractOnlineDiffingDashboard(ABC):
                         st.error(f"Generation failed: {str(e)}")
                         return
             else:
-                text_to_analyze = text
+                text_to_analyze = current_text
 
             # Tokenize and analyze the text
             tokens_dict = self.prepare_text(text_to_analyze)
@@ -401,18 +438,18 @@ class AbstractOnlineDiffingDashboard(ABC):
                 )
 
                 # Store results in session state
-                st.session_state[session_key] = {
+                st.session_state[session_keys['analysis_results']] = {
                     "statistics": results["statistics"],
                     "total_tokens": results["total_tokens"],
                     "html_viz": html_viz,
                     "generated": enable_generation,
                     "model_type": model_type if enable_generation else None,
-                    "original_prompt": text if enable_generation else None,
+                    "original_prompt": current_text if enable_generation else None,
                 }
 
         # Display results if they exist
-        if st.session_state[session_key] is not None:
-            results_data = st.session_state[session_key]
+        if st.session_state[session_keys['analysis_results']] is not None:
+            results_data = st.session_state[session_keys['analysis_results']]
 
             # Display statistics
             col1, col2, col3, col4 = st.columns(4)
@@ -461,18 +498,24 @@ class MaxActivationDashboardComponent:
     - Mandatory latent selection (if latents exist) via text input
     - Optional quantile filtering via selectbox
     - Text search functionality
-    - Shows all examples (no limit)
-    - Filter context display
+    - Lazy loading with pagination for performance
+    - Batch database queries for efficient retrieval
+    - Prepared for hybrid preview/full detail modes
     """
 
-    def __init__(self, max_store, title: str = "Maximum Activating Examples"):
+    def __init__(self, max_store, title: str = "Maximum Activating Examples", 
+                 initial_batch_size: int = 15, batch_size: int = 10):
         """
         Args:
             max_store: MaxActStore instance
             title: Title for the dashboard
+            initial_batch_size: Number of examples to load initially
+            batch_size: Number of examples to load in each subsequent batch
         """
         self.max_store = max_store
         self.title = title
+        self.initial_batch_size = initial_batch_size
+        self.batch_size = batch_size
 
     def _get_available_latents(self) -> List[int]:
         """Get list of available latent indices from the database."""
@@ -488,12 +531,18 @@ class MaxActivationDashboardComponent:
             cursor.execute("SELECT DISTINCT quantile_idx FROM examples WHERE quantile_idx IS NOT NULL ORDER BY quantile_idx")
             return [row[0] for row in cursor.fetchall()]
 
-    def _convert_maxstore_to_dashboard_format(self, examples: List[Dict[str, Any]]) -> List[Tuple[float, List[str], List[float], str]]:
+    def _get_available_datasets(self) -> List[str]:
+        """Get list of available dataset names from the database."""
+        return self.max_store.get_available_datasets()
+
+    def _convert_maxstore_to_dashboard_format(self, examples: List[Dict[str, Any]], 
+                                            detail_mode: str = "full") -> List[Tuple[float, List[str], List[float], str]]:
         """
-        Convert MaxActStore examples to dashboard format.
+        Convert MaxActStore examples to dashboard format with support for different detail modes.
         
         Args:
             examples: List of examples from MaxActStore.get_top_examples()
+            detail_mode: "preview" for quick display, "full" for complete visualization
             
         Returns:
             List of tuples (max_score, tokens, scores_per_token, text)
@@ -501,19 +550,16 @@ class MaxActivationDashboardComponent:
         if not examples:
             return []
             
-        dashboard_examples = []
+        # Assumption: MaxActStore has tokenizer for token conversion
+        assert self.max_store.tokenizer is not None, "MaxActStore must have tokenizer for visualization"
         
-        for example in examples:
-            # Get detailed information including scores_per_token
-            details = self.max_store.get_example_details(example["example_id"])
-            
-            # Check if we have per-token scores
-            if "scores_per_token" in details:
+        if detail_mode == "preview":
+            # Preview mode: just return basic info without detailed scores
+            dashboard_examples = []
+            for example in examples:
                 tokens = self.max_store.tokenizer.convert_ids_to_tokens(example["input_ids"])
-                scores_per_token = np.array(details["scores_per_token"])
-                
-                # Normalize scores (subtract minimum to ensure non-negative)
-                scores_per_token = scores_per_token - scores_per_token.min()
+                # Use uniform scores for preview (all zeros)
+                scores_per_token = np.zeros(len(tokens))
                 
                 dashboard_examples.append((
                     example["max_score"],
@@ -521,24 +567,89 @@ class MaxActivationDashboardComponent:
                     scores_per_token,
                     example["text"]
                 ))
-            else:
-                raise ValueError(f"Could not process example {example['example_id']}: {details}")
-                    
+            return dashboard_examples
+        
+        # Full mode: get detailed activation scores
+        example_ids = [ex["example_id"] for ex in examples]
+        
+        # Use batch method for efficient database access
+        detailed_examples = self.max_store.get_batch_example_details(example_ids, return_dense=True)
+        
+        # Create lookup dictionary for efficient matching
+        details_dict = {ex["example_id"]: ex for ex in detailed_examples}
+        
+        dashboard_examples = []
+        for example in examples:
+            example_id = example["example_id"]
+            
+            # Get detailed info if available
+            if example_id in details_dict:
+                details = details_dict[example_id]
+                # Assumption: All examples must have scores_per_token for full visualization
+                assert "scores_per_token" in details, f"Example {example_id} missing scores_per_token - cannot visualize in full mode"
                 
+                tokens = self.max_store.tokenizer.convert_ids_to_tokens(example["input_ids"])
+                scores_per_token = np.array(details["scores_per_token"])
+                
+                # Shape assertion
+                assert len(tokens) == len(scores_per_token), f"Token/score mismatch: {len(tokens)} tokens vs {len(scores_per_token)} scores"
+                
+                # Normalize scores (subtract minimum to ensure non-negative)
+                scores_per_token = scores_per_token - scores_per_token.min()
+            else:
+                # Fallback to basic display if details not available
+                tokens = self.max_store.tokenizer.convert_ids_to_tokens(example["input_ids"])
+                scores_per_token = np.zeros(len(tokens))
+            
+            dashboard_examples.append((
+                example["max_score"],
+                tokens,
+                scores_per_token,
+                example["text"]
+            ))
+                    
         return dashboard_examples
 
+    def _get_session_keys(self, selected_latent: Optional[int], selected_quantile: Optional[int], 
+                         selected_datasets: List[str], search_term: str) -> Dict[str, str]:
+        """Generate session state keys based on current filters."""
+        datasets_hash = hash(tuple(sorted(selected_datasets))) % 10000 if selected_datasets else 0
+        base_key = f"maxact_{selected_latent}_{selected_quantile}_{datasets_hash}_{hash(search_term) % 10000}"
+        return {
+            "examples": f"{base_key}_examples",
+            "loaded_count": f"{base_key}_loaded_count", 
+            "total_count": f"{base_key}_total_count",
+            "loading": f"{base_key}_loading"
+        }
+
+    def _load_examples_batch(self, selected_latent: Optional[int], selected_quantile: Optional[int], 
+                           selected_datasets: List[str], start_idx: int, batch_size: int) -> List[Dict[str, Any]]:
+        """Load a batch of examples with offset and limit."""
+        # Get all examples with filters but limit to batch size with offset
+        all_examples = self.max_store.get_top_examples(
+            latent_idx=selected_latent,
+            quantile_idx=selected_quantile,
+            dataset_names=selected_datasets if selected_datasets else None
+        )
+        
+        # Apply offset and limit
+        end_idx = start_idx + batch_size
+        return all_examples[start_idx:end_idx]
+
     def display(self):
-        """Render the dashboard component."""
+        """Render the dashboard component with lazy loading."""
 
         st.markdown(f"### {self.title}")
         
         # Get available filter options
         available_latents = self._get_available_latents()
         available_quantiles = self._get_available_quantiles()
+        available_datasets = self._get_available_datasets()
         
         # Initialize filter values
         selected_latent = None
         selected_quantile = None
+        selected_datasets = []
         
         # Latent selection (mandatory if latents exist)
         if available_latents:
@@ -575,11 +686,74 @@ class MaxActivationDashboardComponent:
             if selected_quantile_str != "All":
                 selected_quantile = int(selected_quantile_str)
         
+        # Dataset selection (optional)
+        if available_datasets:
+            selected_datasets = st.multiselect(
+                "Dataset Filter",
+                options=available_datasets,
+                default=[],
+                help="Filter by dataset names (optional). Leave empty to show all datasets."
+            )
+        
         # Search functionality
         search_term = st.text_input(
             "🔍 Search in examples",
             placeholder="Enter text to search for in the examples...",
         )
+        
+        # For methods without latents, we can still proceed
+        if available_latents and selected_latent is None:
+            st.info("Please select a latent index to view examples.")
+            return
+        
+        # Generate session state keys
+        session_keys = self._get_session_keys(selected_latent, selected_quantile, selected_datasets, search_term)
+        
+        # Initialize session state
+        if session_keys["examples"] not in st.session_state:
+            st.session_state[session_keys["examples"]] = []
+            st.session_state[session_keys["loaded_count"]] = 0
+            st.session_state[session_keys["total_count"]] = None
+            st.session_state[session_keys["loading"]] = False
+        
+        # Reset if filters changed (check by comparing with a hash)
+        current_filter_hash = hash((selected_latent, selected_quantile, tuple(sorted(selected_datasets)), search_term))
+        last_filter_key = f"{session_keys['examples']}_filter_hash"
+        if last_filter_key not in st.session_state or st.session_state[last_filter_key] != current_filter_hash:
+            st.session_state[session_keys["examples"]] = []
+            st.session_state[session_keys["loaded_count"]] = 0
+            st.session_state[session_keys["total_count"]] = None
+            st.session_state[last_filter_key] = current_filter_hash
+        
+        # Load initial batch if nothing loaded yet
+        if not st.session_state[session_keys["examples"]] and not st.session_state[session_keys["loading"]]:
+            st.session_state[session_keys["loading"]] = True
+            
+            # Get total count first
+            all_examples_for_count = self.max_store.get_top_examples(
+                latent_idx=selected_latent,
+                quantile_idx=selected_quantile,
+                dataset_names=selected_datasets if selected_datasets else None
+            )
+            st.session_state[session_keys["total_count"]] = len(all_examples_for_count)
+            
+            # Load initial batch
+            initial_examples = self._load_examples_batch(
+                selected_latent, selected_quantile, selected_datasets, 0, self.initial_batch_size
+            )
+            st.session_state[session_keys["examples"]] = initial_examples
+            st.session_state[session_keys["loaded_count"]] = len(initial_examples)
+            st.session_state[session_keys["loading"]] = False
+        
+        # Get current examples from session state
+        loaded_examples = st.session_state[session_keys["examples"]]
+        total_count = st.session_state[session_keys["total_count"]] or 0
+        loaded_count = st.session_state[session_keys["loaded_count"]]
+        
+        # Apply search filter to loaded examples
+        dashboard_examples = self._convert_maxstore_to_dashboard_format(loaded_examples, detail_mode="full")
+        if search_term.strip():
+            dashboard_examples = filter_examples_by_search(dashboard_examples, search_term)
         
         # Build filter context message
         filter_parts = []
@@ -587,39 +761,53 @@ class MaxActivationDashboardComponent:
             filter_parts.append(f"Latent {selected_latent}")
         if selected_quantile is not None:
             filter_parts.append(f"Quantile {selected_quantile}")
+        if selected_datasets:
+            if len(selected_datasets) == 1:
+                filter_parts.append(f"Dataset: {selected_datasets[0]}")
+            else:
+                filter_parts.append(f"Datasets: {', '.join(selected_datasets[:2])}{' (+{} more)'.format(len(selected_datasets) - 2) if len(selected_datasets) > 2 else ''}")
         if search_term.strip():
             filter_parts.append(f"Search: '{search_term}'")
         
-        # For methods without latents, we can still proceed
-        if available_latents and selected_latent is None:
-            st.info("Please select a latent index to view examples.")
-            return
+        # Display status and load more button
+        col1, col2 = st.columns([3, 1])
         
-        # Get examples from store
-        examples = self.max_store.get_top_examples(
-            latent_idx=selected_latent,
-            quantile_idx=selected_quantile
-        )
+        with col1:
+            context_msg = f"Showing {len(dashboard_examples)} examples"
+            if search_term.strip():
+                context_msg += f" (from {loaded_count} loaded, {total_count} total)"
+            else:
+                context_msg += f" ({loaded_count} of {total_count} loaded)"
+            
+            if filter_parts:
+                context_msg += f" - {', '.join(filter_parts)}"
+            
+            st.info(context_msg)
         
-        # Convert to dashboard format
-        dashboard_examples = self._convert_maxstore_to_dashboard_format(examples)
-        
-        # Apply search filter
-        if search_term.strip():
-            dashboard_examples = filter_examples_by_search(dashboard_examples, search_term)
-        
-        # Display filter context
-        context_msg = f"Showing {len(dashboard_examples)} examples"
-        if filter_parts:
-            context_msg += f" ({', '.join(filter_parts)})"
-        else:
-            context_msg += " (all examples)"
-        st.info(context_msg)
+        with col2:
+            # Show load more button if there are more examples to load
+            has_more = loaded_count < total_count
+            if has_more and st.button(f"Load {min(self.batch_size, total_count - loaded_count)} More", 
+                                     disabled=st.session_state[session_keys["loading"]]):
+                st.session_state[session_keys["loading"]] = True
+                
+                # Load next batch
+                next_batch = self._load_examples_batch(
+                    selected_latent, selected_quantile, selected_datasets, loaded_count, self.batch_size
+                )
+                
+                # Append to existing examples
+                st.session_state[session_keys["examples"]].extend(next_batch)
+                st.session_state[session_keys["loaded_count"]] += len(next_batch)
+                st.session_state[session_keys["loading"]] = False
+                
+                # Rerun to update display
+                st.rerun()
         
         # Check if we have examples to show
         if not dashboard_examples:
             if search_term.strip():
-                st.warning("No examples found matching your search and filters.")
+                st.warning("No examples found matching your search. Try loading more examples or changing your search term.")
             else:
                 st.warning("No examples found with the selected filters.")
             return
@@ -633,7 +821,7 @@ class MaxActivationDashboardComponent:
             dashboard_examples,
             self.max_store.tokenizer,
             title=title_with_filters,
-            max_examples=len(dashboard_examples),  # Show all examples
+            max_examples=len(dashboard_examples),  # Show all loaded examples
             window_size=50,
             use_absolute_max=False,
         )

@@ -58,7 +58,9 @@ class MaxActStore:
                     sequence_idx INTEGER PRIMARY KEY,
                     token_ids BLOB NOT NULL,
                     text TEXT,
-                    sequence_length INTEGER NOT NULL
+                    sequence_length INTEGER NOT NULL,
+                    dataset_id INTEGER DEFAULT NULL,
+                    dataset_name TEXT DEFAULT NULL
                 )
             """)
             
@@ -99,6 +101,8 @@ class MaxActStore:
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_examples_score ON examples(score DESC)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_examples_latent ON examples(latent_idx)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_examples_quantile ON examples(quantile_idx)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_sequences_dataset ON sequences(dataset_id)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_sequences_dataset_name ON sequences(dataset_name)")
             
             conn.commit()
     
@@ -135,7 +139,7 @@ class MaxActStore:
                 raise ValueError(f"Storage format conflict: database has '{existing_config['storage_format']}' but '{storage_format}' was provided")
             
             # Set instance attributes
-            self.storage_format = storage_format
+            self._storage_format = storage_format
             self.max_examples = max_examples
             
             # Store/update config in database
@@ -146,6 +150,10 @@ class MaxActStore:
                               ('max_examples', str(max_examples)))
             
             conn.commit()
+
+    @property
+    def storage_format(self):
+        return self._storage_format
     
     def clear(self):
         """Clear all data from the database except config."""
@@ -168,7 +176,8 @@ class MaxActStore:
             cursor.execute("SELECT COUNT(*) FROM examples")
             return cursor.fetchone()[0]
     
-    def _insert_sequence(self, sequence_idx: int, token_ids: torch.Tensor) -> None:
+    def _insert_sequence(self, sequence_idx: int, token_ids: torch.Tensor, 
+                        dataset_id: Optional[int] = None, dataset_name: Optional[str] = None) -> None:
         """Insert a single sequence into the database."""
         # Convert token IDs to binary blob
         binary_data = np.array(token_ids.cpu().tolist(), dtype=np.int32).tobytes()
@@ -183,12 +192,12 @@ class MaxActStore:
             # Enable foreign key constraints for this connection too
             cursor.execute("PRAGMA foreign_keys = ON")
             cursor.execute(
-                "INSERT OR REPLACE INTO sequences VALUES (?, ?, ?, ?)",
-                (sequence_idx, binary_data, text, len(token_ids))
+                "INSERT OR REPLACE INTO sequences VALUES (?, ?, ?, ?, ?, ?)",
+                (sequence_idx, binary_data, text, len(token_ids), dataset_id, dataset_name)
             )
             conn.commit()
     
-    def _insert_sequences_bulk(self, all_sequences: List) -> None:
+    def _insert_sequences_bulk(self, all_sequences: List, dataset_info: Optional[List[Tuple[int, str]]] = None) -> None:
         """Bulk insert sequences into the database."""
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
@@ -211,9 +220,14 @@ class MaxActStore:
                 if self.tokenizer is not None:
                     text = self.tokenizer.decode(token_list, skip_special_tokens=False)
                 
+                # Get dataset info if provided
+                dataset_id, dataset_name = (None, None)
+                if dataset_info and seq_idx < len(dataset_info):
+                    dataset_id, dataset_name = dataset_info[seq_idx]
+                
                 cursor.execute(
-                    "INSERT OR REPLACE INTO sequences VALUES (?, ?, ?, ?)",
-                    (seq_idx, binary_data, text, len(token_list))
+                    "INSERT OR REPLACE INTO sequences VALUES (?, ?, ?, ?, ?, ?)",
+                    (seq_idx, binary_data, text, len(token_list), dataset_id, dataset_name)
                 )
             
             conn.commit()
@@ -456,7 +470,8 @@ class MaxActStore:
         self._maintain_top_k()
     
     def fill(self, examples_data: Dict, all_sequences: List, 
-             activation_details: Optional[Dict] = None) -> None:
+             activation_details: Optional[Dict] = None,
+             dataset_info: Optional[List[Tuple[int, str]]] = None) -> None:
         """
         Bulk load pre-sorted examples data into the database.
         
@@ -464,6 +479,7 @@ class MaxActStore:
             examples_data: Dict mapping quantile_idx -> latent_idx -> list of (score, sequence_idx)
             all_sequences: List of all token sequences
             activation_details: Dict mapping latent_idx -> sequence_idx -> (positions, values) for "sparse" or (values) for "dense"
+            dataset_info: Optional list of (dataset_id, dataset_name) tuples for each sequence
         """
         logger.info("Bulk loading examples into database...")
         
@@ -471,7 +487,7 @@ class MaxActStore:
         self.clear()
         
         # Bulk insert all sequences first
-        self._insert_sequences_bulk(all_sequences)
+        self._insert_sequences_bulk(all_sequences, dataset_info)
         
         # Bulk insert all examples (already sorted, no filtering needed)
         with sqlite3.connect(self.db_path) as conn:
@@ -523,14 +539,16 @@ class MaxActStore:
     
     def get_top_examples(self, limit: Optional[int] = None, 
                         latent_idx: Optional[int] = None,
-                        quantile_idx: Optional[int] = None) -> List[Dict[str, Any]]:
+                        quantile_idx: Optional[int] = None,
+                        dataset_names: Optional[List[str]] = None) -> List[Dict[str, Any]]:
         """
-        Get top examples, optionally filtered by latent_idx and/or quantile_idx.
+        Get top examples, optionally filtered by latent_idx, quantile_idx, and/or dataset_names.
         
         Args:
             limit: Maximum number of examples to return
             latent_idx: Filter by latent index (optional)
             quantile_idx: Filter by quantile index (optional)
+            dataset_names: Filter by dataset names (optional)
             
         Returns:
             List of example dictionaries
@@ -544,7 +562,7 @@ class MaxActStore:
             # Build query with optional filters
             query = """
                 SELECT e.example_id, e.sequence_idx, e.score, e.latent_idx, e.quantile_idx, e.metadata,
-                       s.token_ids, s.text, s.sequence_length
+                       s.token_ids, s.text, s.sequence_length, s.dataset_id, s.dataset_name
                 FROM examples e
                 JOIN sequences s ON e.sequence_idx = s.sequence_idx
             """
@@ -559,6 +577,11 @@ class MaxActStore:
             if quantile_idx is not None:
                 conditions.append("e.quantile_idx = ?")
                 params.append(quantile_idx)
+                
+            if dataset_names is not None and len(dataset_names) > 0:
+                placeholders = ",".join("?" * len(dataset_names))
+                conditions.append(f"s.dataset_name IN ({placeholders})")
+                params.extend(dataset_names)
             
             if conditions:
                 query += " WHERE " + " AND ".join(conditions)
@@ -575,7 +598,7 @@ class MaxActStore:
             # Convert to list of dictionaries
             examples = []
             for row in rows:
-                example_id, sequence_idx, score, latent_idx, quantile_idx, metadata, token_ids_blob, text, seq_length = row
+                example_id, sequence_idx, score, latent_idx, quantile_idx, metadata, token_ids_blob, text, seq_length, dataset_id, dataset_name = row
                 
                 # Decode token IDs
                 token_ids = np.frombuffer(token_ids_blob, dtype=np.int32).tolist()
@@ -592,6 +615,8 @@ class MaxActStore:
                     "sequence_length": seq_length,
                     "latent_idx": latent_idx,
                     "quantile_idx": quantile_idx,
+                    "dataset_id": dataset_id,
+                    "dataset_name": dataset_name,
                     **parsed_metadata
                 }
                 
@@ -599,76 +624,129 @@ class MaxActStore:
             
             return examples
     
-    def get_example_details(self, example_id: int) -> Dict[str, Any]:
+    def get_available_datasets(self) -> List[str]:
+        """Get list of available dataset names."""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute("PRAGMA foreign_keys = ON")
+            cursor.execute("SELECT DISTINCT dataset_name FROM sequences WHERE dataset_name IS NOT NULL ORDER BY dataset_name")
+            rows = cursor.fetchall()
+            return [row[0] for row in rows]
+    
+    def get_example_details(self, example_id: int, return_dense: bool = True) -> Dict[str, Any]:
         """
         Get detailed information about a specific example including activation details.
         
         Args:
             example_id: Example ID to retrieve
+            return_dense: Whether to return the activation details in dense format if they are sparse
             
         Returns:
             Dictionary with example and activation details
         """
+        results = self.get_batch_example_details([example_id], return_dense)
+        if not results:
+            raise ValueError(f"Example {example_id} not found")
+        return results[0]
+    
+    def get_batch_example_details(self, example_ids: List[int], return_dense: bool = True) -> List[Dict[str, Any]]:
+        """
+        Get detailed information about multiple examples efficiently in batch.
+        
+        Args:
+            example_ids: List of example IDs to retrieve
+            return_dense: Whether to return the activation details in dense format if they are sparse
+            
+        Returns:
+            List of dictionaries with example and activation details
+        """
+        if not example_ids:
+            return []
+            
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
             
             # Enable foreign key constraints for this connection too
             cursor.execute("PRAGMA foreign_keys = ON")
             
-            # Get example info
-            cursor.execute("""
+            # Build query with IN clause for batch retrieval
+            placeholders = ",".join("?" * len(example_ids))
+            cursor.execute(f"""
                 SELECT e.example_id, e.sequence_idx, e.score, e.latent_idx, e.quantile_idx, e.metadata,
                        s.token_ids, s.text, s.sequence_length
                 FROM examples e
                 JOIN sequences s ON e.sequence_idx = s.sequence_idx
-                WHERE e.example_id = ?
-            """, (example_id,))
+                WHERE e.example_id IN ({placeholders})
+                ORDER BY e.score DESC
+            """, example_ids)
             
-            row = cursor.fetchone()
-            if not row:
-                raise ValueError(f"Example {example_id} not found")
+            example_rows = cursor.fetchall()
             
-            example_id, sequence_idx, score, latent_idx, quantile_idx, metadata, token_ids_blob, text, seq_length = row
+            # Build results dictionary for efficient lookup
+            results_dict = {}
             
-            # Decode token IDs
-            token_ids = np.frombuffer(token_ids_blob, dtype=np.int32).tolist()
+            for row in example_rows:
+                example_id, sequence_idx, score, latent_idx, quantile_idx, metadata, token_ids_blob, text, seq_length = row
+                
+                # Decode token IDs
+                token_ids = np.frombuffer(token_ids_blob, dtype=np.int32).tolist()
+                
+                # Parse metadata
+                parsed_metadata = json.loads(metadata) if metadata else {}
+                
+                result = {
+                    "example_id": example_id,
+                    "sequence_idx": sequence_idx,
+                    "max_score": score,
+                    "input_ids": token_ids,
+                    "text": text,
+                    "sequence_length": seq_length,
+                    "latent_idx": latent_idx,
+                    "quantile_idx": quantile_idx,
+                    **parsed_metadata
+                }
+                
+                results_dict[example_id] = result
             
-            # Parse metadata
-            parsed_metadata = json.loads(metadata) if metadata else {}
-            
-            result = {
-                "example_id": example_id,
-                "sequence_idx": sequence_idx,
-                "max_score": score,
-                "input_ids": token_ids,
-                "text": text,
-                "sequence_length": seq_length,
-                "latent_idx": latent_idx,
-                "quantile_idx": quantile_idx,
-                **parsed_metadata
-            }
-            
-            # Get activation details if they exist
+            # Batch retrieve activation details if they exist
             if self.storage_format == 'dense':
-                cursor.execute("SELECT activation_values FROM activation_details WHERE example_id = ?", (example_id,))
-                details_row = cursor.fetchone()
+                cursor.execute(f"""
+                    SELECT example_id, activation_values 
+                    FROM activation_details 
+                    WHERE example_id IN ({placeholders})
+                """, example_ids)
+                details_rows = cursor.fetchall()
                 
-                if details_row:
-                    values_blob, = details_row
-                    values = np.frombuffer(values_blob, dtype=np.float32)
-                    result["scores_per_token"] = values.tolist()
-                    # For dense format, positions are just indices where values are non-zero
-                    positions = np.where(values != 0)[0]
-                    result["positions"] = positions.tolist()
+                for example_id, values_blob in details_rows:
+                    if example_id in results_dict:
+                        values = np.frombuffer(values_blob, dtype=np.float32)
+                        results_dict[example_id]["scores_per_token"] = values
+                        if not return_dense:
+                            # For dense format, positions are just indices where values are non-zero
+                            positions = np.where(values != 0)[0]
+                            results_dict[example_id]["positions"] = positions
             else:
-                cursor.execute("SELECT positions, activation_values FROM activation_details WHERE example_id = ?", (example_id,))
-                details_row = cursor.fetchone()
+                cursor.execute(f"""
+                    SELECT example_id, positions, activation_values
+                    FROM activation_details 
+                    WHERE example_id IN ({placeholders})
+                """, example_ids)
+                details_rows = cursor.fetchall()
                 
-                if details_row:
-                    positions_blob, values_blob = details_row
-                    positions = np.frombuffer(positions_blob, dtype=np.int32)
-                    values = np.frombuffer(values_blob, dtype=np.float32)
-                    result["scores_per_token"] = values.tolist()
-                    result["positions"] = positions.tolist()
+                for example_id, positions_blob, values_blob in details_rows:
+                    if example_id in results_dict:
+                        positions = np.frombuffer(positions_blob, dtype=np.int32)
+                        values = np.frombuffer(values_blob, dtype=np.float32)
+                        
+                        if return_dense:
+                            # Convert to dense format
+                            token_ids = results_dict[example_id]["input_ids"]
+                            dense_values = np.zeros(len(token_ids))
+                            dense_values[positions] = values
+                            results_dict[example_id]["scores_per_token"] = dense_values
+                        else:
+                            results_dict[example_id]["scores_per_token"] = values
+                            results_dict[example_id]["positions"] = positions
             
-            return result 
+            # Return results in the same order as requested
+            return [results_dict[example_id] for example_id in example_ids if example_id in results_dict] 

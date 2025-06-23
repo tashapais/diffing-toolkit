@@ -14,29 +14,13 @@ from hydra import compose, initialize_config_dir
 from hydra.core.global_hydra import GlobalHydra
 from pathlib import Path
 import time
-import torch
-
-from src.pipeline.diffing_pipeline import get_method_class  
-
-# # Disable Streamlit file watcher to avoid torch._classes compatibility issues
-# os.environ["STREAMLIT_SERVER_FILE_WATCHER_TYPE"] = "none"
 
 
-def get_main_cfg() -> DictConfig:
-    """Load the main configuration using Hydra."""
-    
-    # Get absolute path to configs directory
-    config_dir = Path("configs").resolve()
-    
-    # Clear any existing Hydra instance
-    if GlobalHydra().is_initialized():
-        GlobalHydra.instance().clear()
-    
-    # Initialize Hydra with the configs directory
-    with initialize_config_dir(config_dir=str(config_dir), version_base=None):
-        # Load the main config (assuming config.yaml exists)
-        cfg = compose(config_name="config")
-        return cfg
+def _get_method_class(method_name: str) -> "DiffingMethod":
+    """Get the method class for a given method name. Wrapped as the import is not available in the global scope and the main function loads quickly"""
+    from src.pipeline.diffing_pipeline import get_method_class
+    return get_method_class(method_name)
+
 
 def discover_organisms() -> List[str]:
     """Discover available organisms from the configs directory."""
@@ -52,26 +36,78 @@ def discover_methods() -> List[str]:
 
 
 @st.cache_data
-def get_available_results() -> Dict[str, Dict[str, List[str]]]:
+def load_config(model: str=None, organism: str=None, method: str=None, cfg_overwrites: List[str]=None) -> DictConfig:
+    """
+    Create minimal config for initializing diffing methods.
+    
+    Args:
+        model: Model name
+        organism: Organism name  
+        method: Method name
+        
+    Returns:
+        Minimal DictConfig for the method
+    """
+    from src.utils.configs import ensure_finetuned_model_resolved
+
+    # Get absolute path to configs directory
+    config_dir = Path("configs").resolve()
+    
+    # Clear any existing Hydra instance
+    if GlobalHydra().is_initialized():
+        GlobalHydra.instance().clear()
+    
+    import torch
+    dtype = "bfloat16" if torch.cuda.is_available() else "float32"
+
+    # Initialize Hydra with the configs directory
+    with initialize_config_dir(config_dir=str(config_dir), version_base=None):
+        overrides = [f"model.dtype={dtype}"]
+        if model is not None:
+            overrides.append(f"model={model}")
+        if organism is not None:
+            overrides.append(f"organism={organism}")
+        if method is not None:
+            overrides.append(f"diffing/method={method}")
+        if cfg_overwrites is not None:
+            overrides.extend(cfg_overwrites)
+        # Compose config with overwrites for model, organism, and method
+        cfg = compose(
+            config_name="config",
+            overrides=overrides
+        )
+        
+        cfg = ensure_finetuned_model_resolved(cfg)
+        
+        # Resolve the configuration to ensure all interpolations are evaluated
+        cfg = OmegaConf.to_container(cfg, resolve=True)
+        cfg = OmegaConf.create(cfg)
+        return cfg
+
+
+@st.cache_data
+def get_available_results(cfg_overwrites: List[str]) -> Dict[str, Dict[str, List[str]]]:
     """
     Compile available results from all diffing methods.
     
     Returns:
         Dict mapping {model: {organism: [methods]}}
     """
+
     available = {}
     
-    main_cfg = get_main_cfg()
+    main_cfg = load_config(cfg_overwrites=cfg_overwrites)
+    print("Results base dir:", main_cfg.diffing.results_base_dir)
     # Get available methods from configs
     available_methods = discover_methods()
     # Check each method for available results
     for method_name in available_methods:
-        method_class = get_method_class(method_name)
+        method_class = _get_method_class(method_name)
+        print(f"#####\n\nChecking method: {method_name}")
         print(method_class)
-        
         # Call static method directly on the class
         method_results = method_class.has_results(Path(main_cfg.diffing.results_base_dir))
-        print(method_results)
+        print(f"Method results: {method_results}")
         # Compile results into the global structure
         for model_name, organisms in method_results.items():
             if model_name not in available:
@@ -86,45 +122,6 @@ def get_available_results() -> Dict[str, Dict[str, List[str]]]:
     
     return available
 
-@st.cache_data
-def load_config(model: str, organism: str, method: str) -> DictConfig:
-    """
-    Create minimal config for initializing diffing methods.
-    
-    Args:
-        model: Model name
-        organism: Organism name  
-        method: Method name
-        
-    Returns:
-        Minimal DictConfig for the method
-    """
-    # Get absolute path to configs directory
-    config_dir = Path("configs").resolve()
-    
-    # Clear any existing Hydra instance
-    if GlobalHydra().is_initialized():
-        GlobalHydra.instance().clear()
-    
-    dtype = "bfloat16" if torch.cuda.is_available() else "float32"
-
-    # Initialize Hydra with the configs directory
-    with initialize_config_dir(config_dir=str(config_dir), version_base=None):
-        # Compose config with overwrites for model, organism, and method
-        cfg = compose(
-            config_name="config",
-            overrides=[
-                f"model={model}",
-                f"organism={organism}",
-                f"diffing/method={method}",
-                f"model.dtype={dtype}"
-            ]
-        )
-        
-        # Resolve the configuration to ensure all interpolations are evaluated
-        cfg = OmegaConf.to_container(cfg, resolve=True)
-        cfg = OmegaConf.create(cfg)
-        return cfg
 
 def main():
     """Main dashboard function."""
@@ -134,13 +131,14 @@ def main():
         layout="wide"
     )
     
-
+    cfg_overwrites = sys.argv[1:] if len(sys.argv) > 1 else []
+    print(f"Overwrites: {cfg_overwrites}")
     
     st.title("🧬 Model Diffing Dashboard")
     st.markdown("Explore differences between base and finetuned models")
-    
     # Discover available results
-    available_results = get_available_results()
+    available_results = get_available_results(cfg_overwrites)
+
     if not available_results:
         st.error("No diffing results found. Run some diffing experiments first!")
         return
@@ -177,8 +175,8 @@ def main():
     try:
         start_time = time.time()
         with st.spinner("Loading method..."):
-            cfg = load_config(selected_model, selected_organism, selected_method)
-            method_class = get_method_class(selected_method)
+            cfg = load_config(selected_model, selected_organism, selected_method, cfg_overwrites)
+            method_class = _get_method_class(selected_method)
             
             if method_class is None:
                 st.error(f"Unknown method: {selected_method}")

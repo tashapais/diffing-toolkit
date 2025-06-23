@@ -294,6 +294,8 @@ def load_activation_dataset_from_config(
     Returns:
         PairedActivationCache containing base and finetuned model activations
     """
+    print(base_model_cfg.model_id)
+    print(finetuned_model_cfg.model_id)
     return load_activation_dataset(
         activation_store_dir=cfg.preprocessing.activation_store_dir,
         split=split,

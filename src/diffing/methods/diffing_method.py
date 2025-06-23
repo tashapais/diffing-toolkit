@@ -114,10 +114,11 @@ class DiffingMethod(ABC):
                 pad_token_id=self.tokenizer.eos_token_id,
                 eos_token_id=self.tokenizer.eos_token_id,
                 repetition_penalty=1.1,
+                disable_compile=True # TODO: figure out why compiling this crashes the model
             )
 
         # Decode the generated text
-        generated_text = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
+        generated_text = self.tokenizer.decode(outputs[0], skip_special_tokens=False)
         return generated_text
 
     @abstractmethod
@@ -137,7 +138,7 @@ class DiffingMethod(ABC):
         Returns:
             Dict mapping {model: {organism: path_to_results}}
         """
-        pass
+        raise NotImplementedError("Subclasses must implement this method")
 
     @property
     def verbose(self) -> bool:

@@ -28,11 +28,4 @@ analysis:
     num_examples: 100  # Number of max activating examples to export
     include_full_messages: true
     include_all_token_norms: true
-    
-# Output configuration
-output:
-  save_raw_norms: false  # Can be memory intensive
-  save_aggregated_stats: true
-  save_max_examples: true
-  output_format: ["json", "pt"]  # JSON for stats, PT for tensors
-  save_per_layer: true  # Save results separately for each layer 
+  

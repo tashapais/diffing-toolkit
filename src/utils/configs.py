@@ -70,6 +70,9 @@ def create_dataset_config(
 
 def get_model_configurations(cfg: DictConfig) -> Tuple[ModelConfig, ModelConfig]:
     """Extract and prepare base and finetuned model configurations."""
+    # Ensure finetuned model is resolved before accessing it
+    cfg = ensure_finetuned_model_resolved(cfg)
+    
     # Base model configuration
     base_model_cfg = create_model_config(cfg.model)
 
@@ -157,8 +160,101 @@ def get_dataset_configurations(
 
     return datasets
 
+
+def resolve_finetuned_model(cfg: DictConfig) -> DictConfig:
+    """
+    Resolve the finetuned model from the registry after all overrides are applied.
+    
+    This function handles the delayed resolution of organism.finetuned_model that
+    cannot be done via simple OmegaConf interpolation due to nested variable resolution.
+    
+    Args:
+        cfg: The configuration object after all Hydra overrides are applied
+        
+    Returns:
+        Updated configuration with organism.finetuned_model properly resolved
+        
+    Raises:
+        ValueError: If the model/organism combination is not found in the registry
+    """
+    try:
+        # Extract the model and organism names from the resolved config
+        model_name = cfg.model.name
+        organism_name = cfg.organism.name
+        
+        # Look up the finetuned model from the registry
+        finetuned_model = cfg.organism_model_registry.mappings[model_name][organism_name]
+        
+        # Set the resolved finetuned model in the organism config
+        cfg.organism.finetuned_model = finetuned_model
+        
+        logger.debug(f"Resolved finetuned model: {model_name}.{organism_name} -> {finetuned_model.model_id}")
+        
+    except KeyError as e:
+        available_models = list(cfg.organism_model_registry.mappings.keys()) if hasattr(cfg, 'organism_model_registry') else []
+        available_organisms = []
+        if hasattr(cfg, 'organism_model_registry') and model_name in cfg.organism_model_registry.mappings:
+            available_organisms = list(cfg.organism_model_registry.mappings[model_name].keys())
+        
+        raise ValueError(
+            f"No finetuned model found for model='{model_name}' and organism='{organism_name}'. "
+            f"Available models: {available_models}. "
+            f"Available organisms for {model_name}: {available_organisms}. "
+            f"Error: {e}"
+        )
+    except AttributeError as e:
+        raise ValueError(
+            f"Configuration missing required fields for model resolution. "
+            f"Expected cfg.model.name, cfg.organism.name, and cfg.organism_model_registry. "
+            f"Error: {e}"
+        )
+    
+    return cfg
+
+
 def load_hydra_config(config_path: str, *overrides) -> DictConfig:
-    """Load a Hydra config from a file."""
+    """
+    Load a Hydra config from a file and resolve the finetuned model.
+    
+    This function loads the configuration, applies all overrides, and then
+    resolves the organism.finetuned_model from the registry using the final
+    model and organism names.
+    
+    Args:
+        config_path: Path to the config file
+        *overrides: Hydra override strings (e.g., "model=gemma3_1B", "organism=kansas_abortion")
+    
+    Returns:
+        Fully resolved configuration with organism.finetuned_model set
+    """
     with initialize(config_path=str(Path(config_path).parent), version_base=None):
         cfg = compose(config_name=Path(config_path).stem, overrides=overrides)
+        
+        # Resolve the finetuned model after all overrides are applied
+        cfg = resolve_finetuned_model(cfg)
+        
     return cfg
+
+
+def ensure_finetuned_model_resolved(cfg: DictConfig) -> DictConfig:
+    """
+    Ensure that the finetuned model is resolved in the configuration.
+    
+    This is a safety function that can be called to ensure the organism.finetuned_model
+    is properly set, regardless of how the configuration was loaded.
+    
+    Args:
+        cfg: Configuration that may or may not have organism.finetuned_model resolved
+        
+    Returns:
+        Configuration with organism.finetuned_model guaranteed to be resolved
+    """
+    # Check if finetuned_model is already resolved
+    if hasattr(cfg.organism, 'finetuned_model') and cfg.organism.finetuned_model is not None:
+        # Already resolved, just log and return
+        logger.debug("Finetuned model already resolved")
+        return cfg
+    
+    # Not resolved, resolve it now
+    logger.debug("Finetuned model not found, resolving from registry")
+    return resolve_finetuned_model(cfg)

@@ -234,17 +234,3 @@ def statistic_interactive_tab(
 
     return tab1, tab2
 
-
-@st.cache_data
-def load_results_file(results_file_path: str) -> Dict[str, Any]:
-    """
-    Load results from JSON file with caching.
-
-    Args:
-        results_file_path: Path to the results file
-
-    Returns:
-        Loaded results dictionary
-    """
-    with open(results_file_path, "r") as f:
-        return json.load(f)

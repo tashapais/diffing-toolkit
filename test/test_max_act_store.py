@@ -15,7 +15,7 @@ import tempfile
 import shutil
 from pathlib import Path
 
-from src.utils.maximum_activating_examples import MaxActStore
+from src.utils.max_act_store import MaxActStore
 
 class MockTokenizer:
     """Mock tokenizer for testing."""

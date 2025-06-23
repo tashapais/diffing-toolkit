@@ -22,7 +22,7 @@ from .diffing_method import DiffingMethod
 from src.utils.activations import get_layer_indices, load_activation_dataset_from_config
 from src.utils.configs import get_dataset_configurations, DatasetConfig  
 from src.utils.cache import SampleCache
-from src.utils.maximum_activating_examples import MaxActStore
+from src.utils.max_act_store import MaxActStore
 from src.utils.dashboards import AbstractOnlineDiffingDashboard
 
 
@@ -417,15 +417,8 @@ class NormDiffDiffingMethod(DiffingMethod):
         statistic_interactive_tab(self._render_dataset_statistics, lambda: NormDiffOnlineDashboard(self).display(), "Norm Difference Analysis")
     
     def _render_dataset_statistics(self):
-        """Render the dataset statistics tab (original visualize functionality)."""
-        from src.utils.visualization import (
-            convert_max_examples_to_dashboard_format, 
-            create_examples_html, 
-            render_streamlit_html,
-            load_results_file,
-            filter_examples_by_search,
-            
-        )
+        """Render the dataset statistics tab using MaxActivationDashboardComponent."""
+        from src.utils.dashboards import MaxActivationDashboardComponent
 
         # Dataset selector
         dataset_dirs = [d for d in self.results_dir.iterdir() if d.is_dir()]
@@ -439,75 +432,65 @@ class NormDiffDiffingMethod(DiffingMethod):
         if not selected_dataset:
             return
         
-        # Load results (cached)
+        # Get dataset directory
         dataset_dir = self.results_dir / selected_dataset
-        results_file = dataset_dir / "results.json"
         
-        if not results_file.exists():
-            st.error(f"Results file not found: {results_file}")
+        if not dataset_dir.exists():
+            st.error(f"Dataset directory not found: {dataset_dir}")
             return
         
-        results = load_results_file(str(results_file))
-        
-        # Layer selector (local to this method)
-        available_layers = list(results['layers'].keys())
-        selected_layer = st.selectbox("Select Layer", available_layers)
-        
-        if not selected_layer:
+        # Find available layers by scanning for database files
+        layer_files = list(dataset_dir.glob("layer_*_examples.db"))
+        if not layer_files:
+            st.error(f"No layer example databases found in {dataset_dir}")
             return
         
-        layer_results = results['layers'][selected_layer]
+        # Extract layer numbers from filenames
+        available_layers = []
+        for layer_file in layer_files:
+            # Extract layer number from filename like "layer_16_examples.db"
+            filename = layer_file.stem  # Remove .db extension
+            if filename.startswith("layer_") and filename.endswith("_examples"):
+                layer_part = filename[6:-9]  # Remove "layer_" prefix and "_examples" suffix
+                try:
+                    layer_num = int(layer_part)
+                    available_layers.append(layer_num)
+                except ValueError as ve:
+                    raise ValueError(f"Invalid layer number in filename: {filename} - extracted layer number: {layer_part} - {ve}")
         
-        # Display statistics
-        stats = layer_results['statistics']
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            st.metric("Mean Norm Diff", f"{stats['mean']:.6f}")
-            st.metric("Max Norm Diff", f"{stats['max']:.6f}")
-        with col2:
-            st.metric("Std Norm Diff", f"{stats['std']:.6f}")
-            st.metric("Median Norm Diff", f"{stats['median']:.6f}")
-        with col3:
-            st.metric("Total Tokens", f"{layer_results['total_tokens_processed']:,}")
-            st.metric("Total Samples", f"{layer_results['total_samples_processed']:,}")
+        available_layers.sort()
         
-        # Convert examples to dashboard format (cached)
-        dashboard_examples = convert_max_examples_to_dashboard_format(
-            layer_results['max_activating_examples'], 
-            self.base_model_cfg
-        )
-        
-        # Search functionality
-        search_term = st.text_input(
-            "🔍 Search in examples", 
-            placeholder="Enter text to search for in the examples..."
-        )
-        
-        # Filter examples and show count
-        if search_term.strip():
-            filtered_examples = filter_examples_by_search(dashboard_examples, search_term)
-            st.info(f"Found {len(filtered_examples)} examples containing '{search_term}' out of {len(dashboard_examples)} total examples")
-            examples_to_show = filtered_examples
-        else:
-            examples_to_show = dashboard_examples
-            st.info(f"Showing all {len(dashboard_examples)} examples")
-        
-        if not examples_to_show:
-            st.warning("No examples found matching your search.")
+        if not available_layers:
+            st.error("No valid layer databases found")
             return
         
-        # Create HTML visualization
-        html_content = create_examples_html(
-            examples_to_show,
-            self.tokenizer,
-            title=f"Norm Difference - {selected_dataset} - {selected_layer}" + (f" - Search: '{search_term}'" if search_term.strip() else ""),
-            max_examples=30,
-            window_size=50,
-            use_absolute_max=False,
-        )
+        # Layer selector
+        selected_layer_num = st.selectbox("Select Layer", available_layers)
         
-        # Render in Streamlit
-        render_streamlit_html(html_content)
+        if selected_layer_num is None:
+            return
+        
+        # Load the MaxActStore for this dataset and layer
+        max_store_path = dataset_dir / f"layer_{selected_layer_num}_examples.db"
+        
+        if not max_store_path.exists():
+            st.error(f"Example database not found: {max_store_path}")
+            return
+
+        # Create MaxActStore instance (read existing storage format from config)
+        assert self.tokenizer is not None, "Tokenizer must be available for MaxActStore visualization"
+        max_store = MaxActStore(
+            max_store_path, 
+            tokenizer=self.tokenizer,
+            storage_format=None  # Read from existing config
+        )
+
+        # Create and display the dashboard component
+        component = MaxActivationDashboardComponent(
+            max_store, 
+            title=f"Norm Difference Examples - {selected_dataset} - Layer {selected_layer_num}"
+        )
+        component.display()
     
     @staticmethod
     def has_results(results_dir: Path) -> Dict[str, Dict[str, str]]:

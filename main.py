@@ -17,7 +17,8 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 
 def hydra_loguru_init() -> None:
-    hydra_path = hydra.core.hydra_config.HydraConfig.get().runtime.output_dir
+    from hydra.core.hydra_config import HydraConfig
+    hydra_path = HydraConfig.get().runtime.output_dir
     logger.add(os.path.join(hydra_path, "main.log"))
 
 
@@ -75,6 +76,11 @@ def run_diffing_pipeline(cfg: DictConfig) -> None:
 @hydra.main(version_base=None, config_path="configs", config_name="config")
 def main(cfg: DictConfig) -> None:
     """Main function that orchestrates the entire pipeline."""
+    from src.utils.configs import ensure_finetuned_model_resolved
+    
+    # Ensure finetuned model is resolved after all Hydra overrides are applied
+    cfg = ensure_finetuned_model_resolved(cfg)
+    
     hydra_loguru_init()
     logger.info("Starting Diffing Game pipeline")
     logger.info(f"Pipeline mode: {cfg.pipeline.mode}")

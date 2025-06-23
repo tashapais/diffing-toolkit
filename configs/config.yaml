@@ -30,9 +30,9 @@ pipeline:
 # Preprocessing configuration (global settings)
 preprocessing:
   activation_store_dir: ${infrastructure.storage.base_dir}/activations
-  layers: [0.25, 0.5, 0.75]  # layers to extract activations from
+  layers: [0.5]  # layers to extract activations from
   max_samples_per_dataset: 100000
-  max_tokens_per_dataset: 10_000_000
+  max_tokens_per_dataset: 50_000_000
   batch_size: 64
   context_len: 1024
   dtype: bfloat16
@@ -55,6 +55,10 @@ diffing:
   results_base_dir: ${infrastructure.storage.base_dir}/diffing_results
   results_dir: ${diffing.results_base_dir}/${model.name}/${organism.name}
   
+
+# Finetuned model will be resolved programmatically after all overrides are applied
+# See src/utils/configs.py:resolve_finetuned_model() for implementation
+
 # Hydra specific
 hydra:
   run:

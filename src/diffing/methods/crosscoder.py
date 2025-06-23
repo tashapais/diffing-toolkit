@@ -25,7 +25,7 @@ from src.utils.activations import get_layer_indices
 from src.utils.dictionary.analysis import build_push_crosscoder_latent_df, make_plots
 from src.utils.dictionary.training import train_crosscoder_for_layer
 from src.utils.dictionary.latent_scaling.closed_form import compute_scalers_from_config
-from src.utils.dictionary.latent_scaling.beta_analysis import make_beta_df
+from src.utils.dictionary.latent_scaling.beta_analysis import update_latent_df_with_beta_values
 from src.utils.dictionary.latent_activations import (
     collect_dictionary_activations_from_config,
     collect_activating_examples,
@@ -129,7 +129,7 @@ class CrosscoderDiffingMethod(DiffingMethod):
                         dictionary_model=dictionary_name,
                         results_dir=model_results_dir,
                     )
-                    make_beta_df(
+                    update_latent_df_with_beta_values(
                         dictionary_name,
                         model_results_dir,
                         num_samples=self.method_cfg.analysis.latent_scaling.num_samples,

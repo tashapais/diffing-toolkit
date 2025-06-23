@@ -24,7 +24,7 @@ from .diffing_method import DiffingMethod
 from src.utils.configs import get_dataset_configurations, DatasetConfig
 from src.utils.activations import get_layer_indices, load_activation_dataset_from_config
 from src.utils.cache import SampleCache
-from src.utils.maximum_activating_examples import MaxActStore
+from src.utils.max_act_store import MaxActStore
 from src.utils.dashboards import AbstractOnlineDiffingDashboard
 
 
@@ -448,41 +448,23 @@ class KLDivergenceDiffingMethod(DiffingMethod):
     def _render_dataset_statistics(self):
         """Render the dataset statistics tab using MaxActivationDashboardComponent."""
         from src.utils.dashboards import MaxActivationDashboardComponent
-        from src.utils.visualization import load_results_file
 
         # Dataset selector
-        dataset_files = list(self.results_dir.glob("*.json"))
+        dataset_files = list(self.results_dir.glob("*.db"))
         if not dataset_files:
             st.error(f"No KL results found in {self.results_dir}")
             return
 
-        dataset_names = [f.stem for f in dataset_files]
+        dataset_names = [f.stem.split("_examples")[0] for f in dataset_files]
         selected_dataset = st.selectbox("Select Dataset", dataset_names)
 
         if not selected_dataset:
             return
 
-        # Load results for statistics display
-        results_file = self.results_dir / f"{selected_dataset}.json"
-        results = load_results_file(str(results_file))
-
-        # Display statistics
-        stats = results["statistics"]
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            st.metric("Mean KL", f"{stats['mean']:.6f}")
-            st.metric("Max KL", f"{stats['max']:.6f}")
-        with col2:
-            st.metric("Std KL", f"{stats['std']:.6f}")
-            st.metric("Median KL", f"{stats['median']:.6f}")
-        with col3:
-            st.metric("Total Tokens", f"{results['total_tokens_processed']:,}")
-            st.metric("Total Sequences", f"{results['total_sequences_processed']:,}")
-
         # Load the MaxActStore for this dataset
         safe_name = selected_dataset
         max_store_path = self.results_dir / f"{safe_name}_examples.db"
-        
+
         if not max_store_path.exists():
             st.error(f"Example database not found: {max_store_path}")
             return
@@ -606,10 +588,6 @@ class KLDivergenceOnlineDashboard(AbstractOnlineDiffingDashboard):
     def get_method_specific_params(self) -> Dict[str, Any]:
         """Get KL-specific parameters (none needed)."""
         return {}
-
-    def _get_color_rgb(self) -> tuple:
-        """Get red color for KL divergence highlighting."""
-        return (255, 0, 0)
 
     def _get_title(self) -> str:
         """Get title for KL analysis."""

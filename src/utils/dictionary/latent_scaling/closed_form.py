@@ -253,6 +253,10 @@ def compute_scalers_from_config(
     
     logger.info(f"Scalers to compute: {scalers_to_compute}")
 
+    if len(scalers_to_compute) == 0:
+        logger.info("No scalers to compute, exiting")
+        return
+
     # Configuration for error computation on latent subsets
     num_effective_ft_only_latents = ls_cfg.num_effective_ft_only_latents
 
