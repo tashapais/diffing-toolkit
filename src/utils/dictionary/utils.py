@@ -8,6 +8,8 @@ import numpy as np
 import warnings
 from pandas.io.formats.printing import pprint_thing
 from tempfile import TemporaryDirectory
+from omegaconf import DictConfig, OmegaConf
+import tempfile
 
 from dictionary_learning.dictionary import BatchTopKSAE, CrossCoder, BatchTopKCrossCoder
 
@@ -103,7 +105,7 @@ def push_latent_df(
                     " or force=True"
                 )
             elif len(missing_columns) > 0 and len(real_missing_columns) == 0:
-                print(f"Removed columns in uploaded df: {missing_columns}")
+                logger.info(f"Removed columns in uploaded df: {missing_columns}")
             else:
                 warnings.warn(
                     f"Missing columns in uploaded df: {missing_columns}\n"
@@ -111,7 +113,7 @@ def push_latent_df(
                 )
 
         if len(added_columns) > 0 and not force:
-            print(f"Added columns in uploaded df: {added_columns}")
+            logger.info(f"Added columns in uploaded df: {added_columns}")
 
         for column in shared_columns:
             if original_df[column].dtype != df[column].dtype:
@@ -126,7 +128,7 @@ def push_latent_df(
             else:
                 equal = original_df[column].equals(df[column])
             if not equal:
-                print(f"Column {column} has different values in original and new df:")
+                logger.info(f"Column {column} has different values in original and new df:")
                 if "float" in str(original_df[column].dtype):
                     diff_ratio = (
                         ~np.isclose(
@@ -137,20 +139,20 @@ def push_latent_df(
                     ).mean() * 100
                 else:
                     diff_ratio = (original_df[column] != df[column]).mean() * 100
-                print(f"% of different values: {diff_ratio:.2f}%")
+                logger.info(f"% of different values: {diff_ratio:.2f}%")
 
-                print(f"Original: {pprint_thing(original_df[column].values)}")
-                print(f"New     : {pprint_thing(df[column].values)}")
+                logger.info(f"Original: {pprint_thing(original_df[column].values)}")
+                logger.info(f"New     : {pprint_thing(df[column].values)}")
                 print("=" * 20 + "\n", flush=True)
     if not repo_exists(repo_id=stats_repo_id(crosscoder), repo_type="dataset"):
         if not create_repo_if_missing:
             raise ValueError(
                 f"Repository {stats_repo_id(crosscoder)} does not exist, can't push latent_df. P"
             )
-        print("Will create a new repository.")
+        logger.info("Will create a new repository.")
 
     if confirm:
-        print(f"Commit message: {commit_message}")
+        logger.info(f"Commit message: {commit_message}")
         r = input("Would you like to push the df to the hub? y/(n)")
         if r != "y":
             raise ValueError("User cancelled")
@@ -172,7 +174,7 @@ def push_latent_df(
             if not create_repo_if_missing:
                 raise e
 
-            print(f"Repository {repo_id} doesn't exist. Creating it...")
+            logger.info(f"Repository {repo_id} doesn't exist. Creating it...")
 
             # Create the repository
             hf_api.create_repo(
@@ -189,7 +191,7 @@ def push_latent_df(
                 repo_type="dataset",
                 commit_message=commit_message or f"Initial upload for {crosscoder}",
             )
-            print(f"Successfully created repository {repo_id} and uploaded data.")
+            logger.info(f"Successfully created repository {repo_id} and uploaded data.")
     return repo_id
 
 
@@ -228,13 +230,13 @@ def push_dictionary_model(model_path: Path, author=HF_NAME):
             commit_message=f"Upload {model_name} dictionary model",
         )
 
-        print(f"Successfully uploaded model to {repo_id}")
+        logger.info(f"Successfully uploaded model to {repo_id}")
     except Exception as e:
-        print(f"Error uploading model to hub: {e}")
+        logger.info(f"Error uploading model to hub: {e}")
 
         # Try creating the repository
         try:
-            print(f"Repository {repo_id} doesn't exist. Creating it...")
+            logger.info(f"Repository {repo_id} doesn't exist. Creating it...")
             hf_api.create_repo(
                 repo_id=repo_id,
                 repo_type="model",
@@ -252,12 +254,48 @@ def push_dictionary_model(model_path: Path, author=HF_NAME):
                 commit_message=f"Initial upload of {model_name} dictionary model",
             )
 
-            print(f"Successfully created repository {repo_id} and uploaded model.")
+            logger.info(f"Successfully created repository {repo_id} and uploaded model.")
         except Exception as e2:
-            print(f"Failed to create repository and upload model: {e2}")
+            logger.info(f"Failed to create repository and upload model: {e2}")
             raise e2
     return repo_id
 
+def push_config_to_hub(
+    cfg: DictConfig,
+    repo_id: str,
+    config_name: str = "training_config.yaml"
+) -> None:
+    """Push a config file to HuggingFace Hub.
+    
+    Args:
+        cfg: Config to upload
+        repo_id: Repository ID on HuggingFace Hub
+        config_name: Name of the config file in the repository
+    """
+
+    # Convert DictConfig to dictionary and save to temporary file
+    config_dict = OmegaConf.to_container(cfg, resolve=True)
+    
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.yaml', delete=False, dir='/tmp') as f:
+        OmegaConf.save(config_dict, f)
+        temp_config_path = f.name   
+    
+    logger.info(f"Config dumped to temporary file: {temp_config_path}")
+    config_path = Path(temp_config_path)
+    assert config_path.exists(), f"Config file does not exist: {config_path}"
+    
+    try:
+        hf_api.upload_file(
+            repo_id=repo_id,
+            path_or_fileobj=config_path,
+            path_in_repo=config_name,
+            repo_type="model",
+            commit_message=f"Upload {config_name}",
+        )
+        logger.info(f"Successfully uploaded {config_name} to {repo_id}")
+    except Exception as e:
+        logger.info(f"Error uploading {config_name} to hub: {e}")
+        raise e
 
 def load_dictionary_model(
     model_name: str | Path, is_sae: bool | None = None, author="science-of-finetuning"

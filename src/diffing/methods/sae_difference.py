@@ -35,9 +35,9 @@ from src.utils.dictionary.latent_activations import (
     collect_activating_examples,
     update_latent_df_with_stats,
 )
-from src.utils.dictionary.utils import load_dictionary_model
-from src.utils.dashboards import AbstractOnlineDiffingDashboard
-
+from src.utils.dictionary.utils import load_latent_df, load_dictionary_model
+from src.utils.dashboards import AbstractOnlineDiffingDashboard, SteeringDashboard
+import streamlit as st
 
 class SAEDifferenceMethod(DiffingMethod):
     """
@@ -66,6 +66,15 @@ class SAEDifferenceMethod(DiffingMethod):
         self.results_dir = Path(cfg.diffing.results_dir)
         self.results_dir.mkdir(parents=True, exist_ok=True)
 
+        self._latent_dfs = {}
+
+    def __hash__(self):
+        return hash(self.cfg)
+    
+    def __eq__(self, other):
+        return self.cfg == other.cfg
+    
+    
     def run(self) -> Dict[str, Any]:
         """
         Main training orchestration with analysis pipeline.
@@ -169,6 +178,8 @@ class SAEDifferenceMethod(DiffingMethod):
                     plots_dir=model_results_dir,
                 )
             logger.info(f"Successfully completed layer {layer_idx}")
+
+        return {"status": "completed", "layers_processed": self.layers}
 
     def visualize(self) -> None:
         """
@@ -284,39 +295,55 @@ class SAEDifferenceMethod(DiffingMethod):
         else:
             st.info("Training metrics not found")
         
-        # Create tab names for reference
-        tab_names = ["📊 MaxAct Examples", "🔥 Online Inference", "📈 Latent Statistics", "🎨 Plots"]
+        # # Create tab names for reference
+        # tab_names = ["📊 MaxAct Examples", "🔥 Online Inference", "🎯 Steering", "📈 Latent Statistics", "🎨 Plots"]
         
-        # Create tabs and handle selection
-        tabs = st.tabs(tab_names)
+        # # Create tabs and handle selection
+        # tabs = st.tabs(tab_names)
         
-        # Monitor which tab is clicked by using session state
-        # This is a workaround since Streamlit doesn't directly expose tab selection
-        current_tab = 0  # Default to first tab
+        # # Monitor which tab is clicked by using session state
+        # # This is a workaround since Streamlit doesn't directly expose tab selection
+        # current_tab = 0  # Default to first tab
         
         # Check if user wants to switch to a specific tab (can be extended with buttons if needed)
         # For now, we'll preserve the session state across reruns
+        from src.utils.visualization import multi_tab_interface
+        multi_tab_interface(
+            [
+                ("📊 MaxAct Examples", lambda: self._render_maxact_tab(selected_sae_info)),
+                ("🔥 Online Inference", lambda: SAEDifferenceOnlineDashboard(self, selected_sae_info).display()),
+                ("🎯 Steering", lambda: SAESteeringDashboard(self, selected_sae_info).display()),
+                ("📈 Latent Statistics", lambda: self._render_latent_statistics_tab(selected_sae_info)),
+                ("🎨 Plots", lambda: self._render_plots_tab(selected_sae_info)),
+            ],
+            "SAE Difference Analysis",
+        )
         
-        # Render content for each tab
-        with tabs[0]:  # MaxAct tab
-            if st.session_state.get('current_tab_content') != 'maxact':
-                st.session_state['current_tab_content'] = 'maxact'
-            self._render_maxact_tab(selected_sae_info)
+        # # Render content for each tab
+        # with tabs[0]:  # MaxAct tab
+        #     if st.session_state.get('current_tab_content') != 'maxact':
+        #         st.session_state['current_tab_content'] = 'maxact'
+        #     self._render_maxact_tab(selected_sae_info)
         
-        with tabs[1]:  # Online Inference tab
-            if st.session_state.get('current_tab_content') != 'online':
-                st.session_state['current_tab_content'] = 'online'
-            SAEDifferenceOnlineDashboard(self, selected_sae_info).display()
+        # with tabs[1]:  # Online Inference tab
+        #     if st.session_state.get('current_tab_content') != 'online':
+        #         st.session_state['current_tab_content'] = 'online'
+        #     SAEDifferenceOnlineDashboard(self, selected_sae_info).display()
         
-        with tabs[2]:  # Latent Statistics tab
-            if st.session_state.get('current_tab_content') != 'stats':
-                st.session_state['current_tab_content'] = 'stats'
-            self._render_latent_statistics_tab(selected_sae_info)
+        # with tabs[2]:  # Steering tab
+        #     if st.session_state.get('current_tab_content') != 'steering':
+        #         st.session_state['current_tab_content'] = 'steering'
+        #     SAESteeringDashboard(self, selected_sae_info).display()
         
-        with tabs[3]:  # Plots tab
-            if st.session_state.get('current_tab_content') != 'plots':
-                st.session_state['current_tab_content'] = 'plots'
-            self._render_plots_tab(selected_sae_info)
+        # with tabs[3]:  # Latent Statistics tab
+        #     if st.session_state.get('current_tab_content') != 'stats':
+        #         st.session_state['current_tab_content'] = 'stats'
+        #     self._render_latent_statistics_tab(selected_sae_info)
+        
+        # with tabs[4]:  # Plots tab
+        #     if st.session_state.get('current_tab_content') != 'plots':
+        #         st.session_state['current_tab_content'] = 'plots'
+        #     self._render_plots_tab(selected_sae_info)
 
     def _get_available_sae_directories(self):
         """Get list of available trained SAE directories."""
@@ -402,11 +429,16 @@ class SAEDifferenceMethod(DiffingMethod):
         )
         component.display()
 
+    def _load_latent_df(self, dictionary_name):
+        """Load the latent DataFrame for a given dictionary name."""
+        if dictionary_name not in self._latent_dfs:
+            self._latent_dfs[dictionary_name] = load_latent_df(dictionary_name)
+        return self._latent_dfs[dictionary_name]
+    
     def _render_latent_statistics_tab(self, selected_sae_info):
         """Render the Latent Statistics tab with interactive DataFrame filtering."""
         import streamlit as st
         import pandas as pd
-        from src.utils.dictionary.utils import load_latent_df
 
         # Use the globally selected SAE
         dictionary_name = selected_sae_info['dictionary_name']
@@ -416,7 +448,7 @@ class SAEDifferenceMethod(DiffingMethod):
         
         try:
             # Load the latent DataFrame
-            df = load_latent_df(dictionary_name)
+            df = self._load_latent_df(dictionary_name)
         except Exception as e:
             st.error(f"Failed to load latent DataFrame for {dictionary_name}: {str(e)}")
             return
@@ -424,7 +456,7 @@ class SAEDifferenceMethod(DiffingMethod):
         st.markdown(f"### Latent Statistics - Layer {layer}")
         st.markdown(f"**Dictionary:** {dictionary_name}")
         st.markdown(f"**Total latents:** {len(df)}")
-        
+
         # Column information
         with st.expander("Column Descriptions", expanded=False):
             st.markdown("""
@@ -633,7 +665,7 @@ class SAEDifferenceMethod(DiffingMethod):
 
     @torch.no_grad()
     def compute_sae_activations_for_tokens(
-        self, input_ids: torch.Tensor, attention_mask: torch.Tensor, layer: int
+        self, dictionary_name: str, input_ids: torch.Tensor, attention_mask: torch.Tensor, layer: int
     ) -> Dict[str, Any]:
         """
         Compute SAE latent activations for given tokens (used by online dashboard).
@@ -654,7 +686,6 @@ class SAEDifferenceMethod(DiffingMethod):
         """
         from nnsight import LanguageModel
         from src.utils.dictionary.utils import load_dictionary_model
-        from src.utils.dictionary.training import sae_difference_run_name
         
         # Shape assertions
         assert input_ids.ndim == 2, f"Expected 2D input_ids, got shape {input_ids.shape}"
@@ -706,10 +737,6 @@ class SAEDifferenceMethod(DiffingMethod):
         assert activation_diffs.shape == (batch_size, seq_len, hidden_dim), f"Expected diff shape {(batch_size, seq_len, hidden_dim)}, got {activation_diffs.shape}"
         
         # Load the trained SAE model for this layer
-        dictionary_name = sae_difference_run_name(
-            self.cfg, layer, self.base_model_cfg, self.finetuned_model_cfg
-        )
-        
         try:
             sae_model = load_dictionary_model(dictionary_name, is_sae=True)
             sae_model = sae_model.to(self.device)
@@ -752,7 +779,6 @@ class SAEDifferenceMethod(DiffingMethod):
             'dict_size': dict_size
         }
 
-    
     @staticmethod
     def has_results(results_dir: Path) -> Dict[str, Dict[str, str]]:
         """
@@ -787,6 +813,165 @@ class SAEDifferenceMethod(DiffingMethod):
                     results[model_name][organism_name] = str(sae_dir)
 
         return results
+
+
+class SAESteeringDashboard(SteeringDashboard):
+    """
+    SAE-specific steering dashboard with cached SAE model.
+    """
+    
+    def __init__(self, method_instance, sae_info):
+        super().__init__(method_instance)
+        self.sae_info = sae_info
+        self._layer = sae_info['layer']
+        self._sae_model = None  # Cache the SAE model
+        self._max_acts = self.method._load_latent_df(self.sae_info['dictionary_name'])['max_act_validation']
+    
+    def __hash__(self):
+        return hash((self._layer, self.sae_info['dictionary_name']))
+    
+    @property
+    def layer(self) -> int:
+        """Get the layer number for this steering dashboard."""
+        return self._layer
+    
+    def get_latent(self, idx: int) -> torch.Tensor:
+        """
+        Get decoder vector for specified latent index from the cached SAE.
+        
+        Args:
+            idx: Latent index
+            
+        Returns:
+            Decoder vector [hidden_dim] for the specified latent
+        """
+        # Load SAE model if not cached
+        if self._sae_model is None:
+            from src.utils.dictionary.utils import load_dictionary_model
+            
+            dictionary_name = self.sae_info['dictionary_name']
+            
+            try:
+                self._sae_model = load_dictionary_model(dictionary_name, is_sae=True)
+                self._sae_model = self._sae_model.to(self.method.device)
+            except Exception as e:
+                raise RuntimeError(f"Failed to load SAE model {dictionary_name}: {str(e)}")
+        
+        # Extract decoder vector for the specified latent
+        # SAE decoder is nn.Linear(dict_size, activation_dim, bias=False)
+        # decoder.weight shape: [activation_dim, dict_size]
+        # We want the decoder vector for latent idx: decoder.weight[:, idx]
+        
+        dict_size = self._sae_model.dict_size
+        assert 0 <= idx < dict_size, f"Latent index {idx} out of range [0, {dict_size})"
+        
+        decoder_vector = self._sae_model.decoder.weight[:, idx]  # [activation_dim]
+
+        return decoder_vector.detach()
+    
+    def get_dict_size(self) -> int:
+        """Get the dictionary size for validation."""
+        # Load SAE model if not cached
+        if self._sae_model is None:
+            from src.utils.dictionary.utils import load_dictionary_model
+            
+            dictionary_name = self.sae_info['dictionary_name']
+            
+            try:
+                self._sae_model = load_dictionary_model(dictionary_name, is_sae=True)
+                self._sae_model = self._sae_model.to(self.method.device)
+            except Exception as e:
+                raise RuntimeError(f"Failed to load SAE model {dictionary_name}: {str(e)}")
+        
+        return self._sae_model.dict_size
+    
+    def _get_title(self) -> str:
+        """Get title for SAE steering analysis."""
+        return f"SAE Latent Steering - Layer {self.layer}"
+    
+    def get_max_activation(self, latent_idx: int) -> float:
+        """
+        Get the maximum activation value for a specific latent from latent_df.
+        
+        Args:
+            latent_idx: Latent index
+            
+        Returns:
+            Maximum activation value for the latent
+        """
+        
+        if latent_idx in self._max_acts.index:
+            return float(self._max_acts.loc[latent_idx])
+        else: 
+            return "unknown"
+
+    @st.fragment
+    def _render_latent_selector(self) -> int:
+        """Render latent selection UI fragment with session state."""
+        import streamlit as st
+        
+        # Get dictionary size for validation
+        dict_size = self.get_dict_size()
+        
+        # Create unique session state key for this steering dashboard
+        session_key = f"sae_steering_latent_idx_layer_{self.layer}"
+        
+        # Initialize session state if not exists
+        if session_key not in st.session_state:
+            st.session_state[session_key] = 0
+        
+        # Ensure the session state value is within valid range
+        if st.session_state[session_key] >= dict_size:
+            st.session_state[session_key] = 0
+        
+        latent_idx = st.number_input(
+            "Latent Index",
+            min_value=0,
+            max_value=dict_size - 1,
+            value=st.session_state[session_key],
+            step=1,
+            help=f"Choose which latent to steer (0-{dict_size - 1})",
+            key=session_key
+        )
+        
+        # Display max activation for the selected latent
+        max_act = self.get_max_activation(latent_idx)
+        st.info(f"**Max Activation:** {max_act}")
+        
+        return latent_idx
+    
+    def _render_streamlit_method_controls(self) -> Dict[str, Any]:
+        """Render SAE steering-specific controls in Streamlit."""
+        import streamlit as st
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            latent_idx = self._render_latent_selector()
+        
+        with col2:
+            steering_factor = st.slider(
+                "Steering Factor", 
+                min_value=-1000.0,
+                max_value=1000.0,
+                value=1.0,
+                step=0.1,
+                help="Strength and direction of steering (negative values reverse the effect)"
+            )
+        
+        steering_mode = st.selectbox(
+            "Steering Mode",
+            options=["prompt_only", "all_tokens"],
+            index=1,  # Default to all_tokens
+            help="Apply steering only to prompt tokens or to all tokens (prompt + generated)"
+        )
+        
+        return {
+            "latent_idx": latent_idx,
+            "steering_factor": steering_factor,
+            "steering_mode": steering_mode
+        }
+
 
 class SAEDifferenceOnlineDashboard(AbstractOnlineDiffingDashboard):
     """
@@ -825,7 +1010,7 @@ class SAEDifferenceOnlineDashboard(AbstractOnlineDiffingDashboard):
         latent_idx = kwargs.get("latent_idx", 0)
         
         # Get full SAE activations from the parent method
-        results = self.method.compute_sae_activations_for_tokens(input_ids, attention_mask, layer)
+        results = self.method.compute_sae_activations_for_tokens(self.sae_info['dictionary_name'], input_ids, attention_mask, layer)
         
         # Use activations for specific latent
         latent_activations = results['latent_activations']  # [seq_len, dict_size]

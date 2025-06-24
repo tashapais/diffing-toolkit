@@ -411,10 +411,16 @@ class NormDiffDiffingMethod(DiffingMethod):
         Returns:
             Streamlit component displaying dataset statistics and interactive analysis
         """
-        from src.utils.visualization import statistic_interactive_tab
+        from src.utils.visualization import multi_tab_interface
 
 
-        statistic_interactive_tab(self._render_dataset_statistics, lambda: NormDiffOnlineDashboard(self).display(), "Norm Difference Analysis")
+        multi_tab_interface(
+            [
+                ("📊 Dataset Statistics", self._render_dataset_statistics),
+                ("🔥 Interactive", lambda: NormDiffOnlineDashboard(self).display()),
+            ],
+            "Norm Difference Analysis",
+        )
     
     def _render_dataset_statistics(self):
         """Render the dataset statistics tab using MaxActivationDashboardComponent."""

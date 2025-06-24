@@ -30,7 +30,7 @@ from ..activations import (
     calculate_samples_per_dataset,
 )
 from ..configs import get_model_configurations, get_dataset_configurations
-from ..dictionary.utils import push_dictionary_model
+from ..dictionary.utils import push_dictionary_model, push_config_to_hub
 from ..cache import DifferenceCache
 
 
@@ -244,6 +244,8 @@ def setup_training_datasets(
     for dataset_name, num_samples in zip(caches.keys(), num_samples_per_dataset):
         logger.info(f"\tUsing {num_samples} samples for {dataset_name}")
 
+    raise NotImplementedError("SKIP BOS TOKENS")
+    
     # Create training dataset
     train_dataset = ConcatDataset(
         [
@@ -251,6 +253,9 @@ def setup_training_datasets(
             for dataset_name, num_samples in zip(caches.keys(), num_samples_per_dataset)
         ]
     )
+
+    # Get forbidden indices
+
 
     # Apply local shuffling if enabled
     if training_cfg.local_shuffling and (
@@ -417,8 +422,10 @@ def crosscoder_run_name(
     else:
         raise ValueError(f"Invalid model type: {model_type}")
     
-    if method_cfg.datasets.normalization.enabled:
-        run_name += f"-tv{method_cfg.datasets.normalization.target_variance:.1f}"
+    if method_cfg.datasets.normalization.enabled and method_cfg.datasets.normalization.target_rms is not None:
+        run_name += f"-trms{int(method_cfg.datasets.normalization.target_rms)}"
+
+    run_name = run_name.replace(".", "p")
 
     return run_name
 
@@ -439,13 +446,16 @@ def sae_difference_run_name(
 
     run_name = (
         f"SAE-difference_{target_short}-{base_model_cfg.name}-{cfg.organism.name}-L{layer}-k{k}-x{expansion_factor}-lr{lr:.0e}"
-        + ("-local-shuffling" if method_cfg.training.local_shuffling else "")
     )
     if not method_cfg.datasets.normalization.enabled:
         run_name += "-no-normalization"
 
-    if method_cfg.datasets.normalization.enabled:
-        run_name += f"-tv{method_cfg.datasets.normalization.target_variance:.1f}"
+    run_name += f"-ei{method_cfg.training.encoder_init_norm:.2e}"
+
+    if method_cfg.datasets.normalization.enabled and method_cfg.datasets.normalization.target_rms is not None:
+        run_name += f"-trms{int(method_cfg.datasets.normalization.target_rms)}"
+
+    run_name = run_name.replace(".", "p")
 
     return run_name
 
@@ -492,7 +502,7 @@ def create_crosscoder_trainer_config(
 
     # Extract optimization parameters
     warmup_steps = method_cfg.optimization.warmup_steps
-    dictionary_size = expansion_factor * activation_dim
+    dictionary_size = int(expansion_factor * activation_dim)
 
     # Common configuration
     common_config = {
@@ -515,7 +525,7 @@ def create_crosscoder_trainer_config(
         },
         "activation_mean": normalize_mean,
         "activation_std": normalize_std,
-        "target_variance": method_cfg.datasets.normalization.target_variance,
+        "target_rms": method_cfg.datasets.normalization.target_rms,
     }
 
     # Type-specific configuration
@@ -694,7 +704,7 @@ def create_sae_difference_trainer_config(
     # Extract optimization parameters
     warmup_steps = method_cfg.optimization.warmup_steps
 
-    dictionary_size = expansion_factor * activation_dim
+    dictionary_size = int(expansion_factor * activation_dim)
 
     # SAE trainer configuration
     trainer_config = {
@@ -712,7 +722,8 @@ def create_sae_difference_trainer_config(
         "k": k,
         "activation_mean": normalize_mean,
         "activation_std": normalize_std,
-        "target_variance": method_cfg.datasets.normalization.target_variance,
+        "encoder_init_norm": method_cfg.training.encoder_init_norm,
+        "target_rms": method_cfg.datasets.normalization.target_rms,
     }
 
     return trainer_config
@@ -862,6 +873,7 @@ def train_sae_difference_for_layer(
 
     if cfg.diffing.method.upload.model:
         hf_repo_id = push_dictionary_model(Path(save_dir) / "model_final.pt")
+        push_config_to_hub(cfg, hf_repo_id)
     else:
         logger.warning(
             f"Not uploading model to Hugging Face because upload.model is False, which can break downstream code. Only use this if you know what you are doing."

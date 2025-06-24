@@ -172,6 +172,24 @@ def make_plots(
         plot_correlation_with_frequency(df, plots_dir)
         plot_rank_distributions(target_df, plots_dir)
     
+    if "enc_norm" in df.columns:
+        plot_enc_norms(df, plots_dir)
+    
+
+def plot_enc_norms(df, plots_dir):
+    """Plot histogram of encoder norms"""
+    plt.figure(figsize=(6, 4))
+    plt.rcParams["text.usetex"] = True
+    plt.rcParams.update({"font.size": 24})
+    
+    plt.hist(df["enc_norm"], bins=100, alpha=0.7, color="blue")
+    plt.xlabel("Encoder Norm")
+    plt.ylabel("Count")
+    plt.title("Encoder Norms")
+    
+    plt.tight_layout()
+    plt.savefig(plots_dir / "enc_norms.pdf", bbox_inches="tight")
+    plt.close()
 
 def plot_beta_ratios_template_perc(target_df, filtered_df, plots_dir):
     """Plot histograms of beta ratios for template percentage

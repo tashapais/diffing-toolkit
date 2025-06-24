@@ -1,5 +1,6 @@
 [server]
-fileWatcherType = "none"
+fileWatcherType = "poll"    # watchdog→polling fallback (default)
+runOnSave = true            # rerun the app as soon as you hit <Ctrl-S>
 
-[browser]
-gatherUsageStats = false 
+[runner]
+fastReruns = true

@@ -5,4 +5,4 @@ end_of_turn_token: <end_of_turn>
 attn_implementation: eager
 ignore_first_n_tokens_per_sample: 0
 token_level_replacement: null
-dtype: bfloat16
+dtype: float32

@@ -76,11 +76,7 @@ def run_diffing_pipeline(cfg: DictConfig) -> None:
 @hydra.main(version_base=None, config_path="configs", config_name="config")
 def main(cfg: DictConfig) -> None:
     """Main function that orchestrates the entire pipeline."""
-    from src.utils.configs import ensure_finetuned_model_resolved
-    
-    # Ensure finetuned model is resolved after all Hydra overrides are applied
-    cfg = ensure_finetuned_model_resolved(cfg)
-    
+
     hydra_loguru_init()
     logger.info("Starting Diffing Game pipeline")
     logger.info(f"Pipeline mode: {cfg.pipeline.mode}")

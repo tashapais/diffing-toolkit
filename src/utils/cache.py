@@ -218,22 +218,26 @@ class SampleCache:
         self.cache = cache
         self.bos_token_id = bos_token_id
         self.max_num_samples = max_num_samples
+        self.sample_start_indices = None
         if isinstance(cache, PairedActivationCache):
             assert torch.all(
                 cache.tokens[0] == cache.tokens[1]
             ), "Tokens must be the same for PairedActivationCache"
             self._tokens = cache.tokens[0]
+            self.sample_start_indices = cache.activation_cache_1.sample_start_indices
             assert (
                 not cache.activation_cache_1.config["shuffle_shards"]
                 and not cache.activation_cache_2.config["shuffle_shards"]
             ), "Shuffled shards are not supported for SampleCache"
         elif isinstance(cache, ActivationCache):
             self._tokens = cache.tokens
+            self.sample_start_indices = cache.sequence_ranges
             assert not cache.config[
                 "shuffle_shards"
             ], "Shuffled shards are not supported for SampleCache"
         elif isinstance(cache, DifferenceCache):
             self._tokens = cache.tokens
+            self.sample_start_indices = cache.activation_cache_1.sample_start_indices
             assert (
                 not cache.activation_cache_1.config["shuffle_shards"]
                 and not cache.activation_cache_2.config["shuffle_shards"]
@@ -241,9 +245,10 @@ class SampleCache:
         else:
             raise ValueError(f"Unsupported cache type: {type(cache)}")
         tokens = self._tokens.tolist()
-        self.sample_start_indices = [
-            i for i in range(len(tokens)) if tokens[i] == self.bos_token_id
-        ] + [len(tokens)]
+        if self.sample_start_indices is None:
+            self.sample_start_indices = [
+                i for i in range(len(tokens)) if tokens[i] == self.bos_token_id
+            ] + [len(tokens)]
         if self.max_num_samples is not None:
             self.sample_start_indices = self.sample_start_indices[
                 : self.max_num_samples + 1

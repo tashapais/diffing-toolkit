@@ -196,10 +196,7 @@ def render_streamlit_html(html_content: str, height: int = 800) -> None:
 @st.fragment
 def _render_statistics_tab(statistics_function: Callable, title: str):
     """Render statistics tab as a fragment to prevent full page reloads."""
-    try:
-        statistics_function()
-    except Exception as e:
-        st.error(f"Error loading statistics: {str(e)}")
+    statistics_function()
 
 
 @st.fragment
@@ -208,6 +205,28 @@ def _render_interactive_tab(interactive_function: Callable, title: str):
     interactive_function()
 
 
+def multi_tab_interface(tabs: List[Tuple[str, Callable]], title: str):
+    """
+    Create a multi-tab interface with dynamic number of tabs and optimized rendering.
+    Uses Streamlit fragments to prevent unnecessary full page reloads.
+
+    Args:
+        tabs: List of tuples containing (tab_title, tab_function)
+        title: Title for the interface
+
+    Returns:
+        List of Streamlit tab components
+    """
+    st.subheader(title)
+    for st_tab, (_, fn) in zip(st.tabs([t for t, _ in tabs]), tabs):
+        with st_tab:
+            _tab_fragment(fn)    
+
+@st.fragment
+def _tab_fragment(render_fn):
+    with st.container():            
+        render_fn()
+        
 def statistic_interactive_tab(
     statistics_function: Callable, interactive_function: Callable, title: str
 ):
@@ -233,4 +252,3 @@ def statistic_interactive_tab(
         _render_interactive_tab(interactive_function, title)
 
     return tab1, tab2
-

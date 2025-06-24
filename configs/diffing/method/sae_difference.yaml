@@ -8,7 +8,8 @@ training:
   batch_size: 2048
   epochs: 2
   lr: 1e-3
-  max_steps: 20000  # Auto-calculate from dataset size
+  encoder_init_norm: 1.0
+  max_steps: null  # Auto-calculate from dataset size
   validate_every_n_steps: 20000
   k: 100   # Sparsity for batch-top-k SAE
   
@@ -30,7 +31,7 @@ datasets:
     subsample_size: 1_000_000  # Number of samples to use for std computation
     batch_size: 4096
     cache_dir: "${infrastructure.storage.base_dir}/diff_normalizer"
-    target_variance: 10.0
+    target_rms: 1.0
 
 # Model configuration - only BatchTopK supported
 model:
@@ -45,14 +46,14 @@ layers: null  # Fraction of model layers to train on, if null, train on all avai
 
 # Analysis configuration
 analysis:
-  enabled: false
+  enabled: true
 
   latent_scaling:
     enabled: true
     dataset_split: "train"
     targets: ["base_activation", "ft_activation"]
-    num_samples: 1_000_000
-    batch_size: 128
+    num_samples: 150_000_000
+    batch_size: 256
     num_workers: 4
     device: "cuda"
     dtype: "float32"
@@ -65,7 +66,7 @@ analysis:
     upload_to_hub: false # Upload max activations to hub
     n_max_activations: 100 # Number of max activations to collect
     max_num_samples: 1000 # Maximum number of samples to collect per dataset
-    overwrite: false # Overwrite existing latent activations and max activations
+    overwrite: false # Overwrite existing latent^ activations and max activations
 
 upload:
-  model: false
+  model: true

@@ -96,7 +96,7 @@ class PreprocessingPipeline(Pipeline):
         dataset: Dataset,
     ) -> None:
         """Collect activations for a specific model-dataset combination."""
-
+        
         # Apply organism-specific preprocessing overrides
         organism_overrides = self.cfg.organism.get(
             "preprocessing_overrides", {}

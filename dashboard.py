@@ -16,6 +16,28 @@ from pathlib import Path
 import time
 
 
+@st.cache_resource(show_spinner="Importing dependencies: torch...")
+def _import_torch():
+    import torch
+    
+@st.cache_resource(show_spinner="Importing dependencies: transformers...")
+def _import_transformers():
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+    
+@st.cache_resource(show_spinner="Importing dependencies: nnsight...")
+def _import_nnsight():
+    import nnsight
+
+@st.cache_resource(show_spinner="Importing dependencies: others...")
+def _import_others():
+    import src
+    
+def _import():
+    _import_torch()
+    _import_transformers()
+    _import_nnsight()
+    _import_others()
+
 def _get_method_class(method_name: str) -> "DiffingMethod":
     """Get the method class for a given method name. Wrapped as the import is not available in the global scope and the main function loads quickly"""
     from src.pipeline.diffing_pipeline import get_method_class
@@ -48,7 +70,7 @@ def load_config(model: str=None, organism: str=None, method: str=None, cfg_overw
     Returns:
         Minimal DictConfig for the method
     """
-    from src.utils.configs import ensure_finetuned_model_resolved
+    import torch
 
     # Get absolute path to configs directory
     config_dir = Path("configs").resolve()
@@ -57,7 +79,6 @@ def load_config(model: str=None, organism: str=None, method: str=None, cfg_overw
     if GlobalHydra().is_initialized():
         GlobalHydra.instance().clear()
     
-    import torch
     dtype = "bfloat16" if torch.cuda.is_available() else "float32"
 
     # Initialize Hydra with the configs directory
@@ -77,7 +98,6 @@ def load_config(model: str=None, organism: str=None, method: str=None, cfg_overw
             overrides=overrides
         )
         
-        cfg = ensure_finetuned_model_resolved(cfg)
         
         # Resolve the configuration to ensure all interpolations are evaluated
         cfg = OmegaConf.to_container(cfg, resolve=True)
@@ -136,6 +156,9 @@ def main():
     
     st.title("🧬 Model Diffing Dashboard")
     st.markdown("Explore differences between base and finetuned models")
+
+    _import()
+
     # Discover available results
     available_results = get_available_results(cfg_overwrites)
 
