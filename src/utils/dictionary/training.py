@@ -243,8 +243,6 @@ def setup_training_datasets(
     logger.info(f"Using {sum(num_samples_per_dataset)} samples in total")
     for dataset_name, num_samples in zip(caches.keys(), num_samples_per_dataset):
         logger.info(f"\tUsing {num_samples} samples for {dataset_name}")
-
-    raise NotImplementedError("SKIP BOS TOKENS")
     
     # Create training dataset
     train_dataset = ConcatDataset(
@@ -253,8 +251,6 @@ def setup_training_datasets(
             for dataset_name, num_samples in zip(caches.keys(), num_samples_per_dataset)
         ]
     )
-
-    # Get forbidden indices
 
 
     # Apply local shuffling if enabled
@@ -335,6 +331,7 @@ def create_training_dataloader(
     cfg: DictConfig,
     shuffle: bool = True,
     overwrite_batch_size: int = None,
+    drop_last: bool = False,
 ) -> DataLoader:
     """
     Create DataLoader with configuration from preprocessing and method settings.
@@ -344,6 +341,7 @@ def create_training_dataloader(
         cfg: Full configuration
         shuffle: Whether to shuffle the data (disabled for local shuffling)
         overwrite_batch_size: If provided, use this batch size instead of the one in the configuration
+        drop_last: Whether to drop the last batch if it's not full
     Returns:
         Configured DataLoader
     """
@@ -360,6 +358,7 @@ def create_training_dataloader(
         and not training_cfg.local_shuffling,  # Don't shuffle if using local shuffling
         num_workers=training_cfg.workers,
         pin_memory=True,
+        drop_last=drop_last,
     )
 
 
@@ -410,22 +409,25 @@ def crosscoder_run_name(
     if model_type == "relu":
         run_name = (
             f"{base_model_cfg.name}-{cfg.organism.name}-L{layer}-mu{mu:.1e}-lr{lr:.0e}-x{expansion_factor}"
-            + "-local-shuffling"
             + f"-{code_normalization.capitalize()}Loss"
         )
     elif model_type == "batch-top-k":
         run_name = (
             f"{base_model_cfg.name}-{cfg.organism.name}-L{layer}-k{k}-lr{lr:.0e}-x{expansion_factor}"
-            + "-local-shuffling"
             + f"-{code_normalization.capitalize()}"
         )
     else:
         raise ValueError(f"Invalid model type: {model_type}")
     
-    if method_cfg.datasets.normalization.enabled and method_cfg.datasets.normalization.target_rms is not None:
+    if method_cfg.datasets.normalization.enabled and method_cfg.datasets.normalization.target_rms is not None and method_cfg.datasets.normalization.target_rms != 200:
         run_name += f"-trms{int(method_cfg.datasets.normalization.target_rms)}"
 
     run_name = run_name.replace(".", "p")
+
+    if len("science-of-finetuning/"+run_name) > 96:
+        run_name = run_name.replace(cfg.organism.name, "".join([word[0] for word in cfg.organism.name.split("_")]))
+        if len("science-of-finetuning/"+run_name) > 96:
+            raise ValueError(f"Run name too long: {run_name}")
 
     return run_name
 
@@ -445,17 +447,23 @@ def sae_difference_run_name(
     target_short = target.split("_")[1]  # "bft" or "ftb"
 
     run_name = (
-        f"SAE-difference_{target_short}-{base_model_cfg.name}-{cfg.organism.name}-L{layer}-k{k}-x{expansion_factor}-lr{lr:.0e}"
+        f"SAEdiff_{target_short.replace("difference_", "")}-{base_model_cfg.name}-{cfg.organism.name}-L{layer}-k{k}-x{expansion_factor}-lr{lr:.0e}"
     )
     if not method_cfg.datasets.normalization.enabled:
-        run_name += "-no-normalization"
+        run_name += "-nonorm"
 
-    run_name += f"-ei{method_cfg.training.encoder_init_norm:.2e}"
+    if method_cfg.training.encoder_init_norm != 1.0:    
+        run_name += f"-ei{method_cfg.training.encoder_init_norm:.2e}"
 
     if method_cfg.datasets.normalization.enabled and method_cfg.datasets.normalization.target_rms is not None:
-        run_name += f"-trms{int(method_cfg.datasets.normalization.target_rms)}"
+        run_name += f"-t{int(method_cfg.datasets.normalization.target_rms)}"
 
     run_name = run_name.replace(".", "p")
+
+    if len("science-of-finetuning/"+run_name) > 96:
+        run_name = run_name.replace(cfg.organism.name, "".join([word[0] for word in cfg.organism.name.split("_")]))
+        if len("science-of-finetuning/"+run_name) > 96:
+            raise ValueError(f"Run name too long: {run_name}")
 
     return run_name
 
@@ -619,7 +627,7 @@ def train_crosscoder_for_layer(
     )
 
     # Train the crosscoder
-    trainSAE(
+    model, last_eval_logs = trainSAE(
         data=train_dataloader,
         trainer_config=trainer_config,
         validate_every_n_steps=validate_every_n_steps,
@@ -633,6 +641,7 @@ def train_crosscoder_for_layer(
         save_steps=validate_every_n_steps,
         run_wandb_finish=False,
         epoch_idx_per_step=epoch_idx_per_step,
+        return_last_eval_logs=True,
     )
 
     wandb_link = None
@@ -658,6 +667,7 @@ def train_crosscoder_for_layer(
         "run_name": trainer_config["wandb_name"],
         "hf_repo_id": hf_repo_id,
         "training_mode": "crosscoder",
+        "last_eval_logs": {k: v.item() if isinstance(v, torch.Tensor) else v for k, v in last_eval_logs.items()},
     }
 
     logger.info(f"Successfully trained crosscoder for layer {layer_idx}")

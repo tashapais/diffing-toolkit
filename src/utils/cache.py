@@ -19,8 +19,10 @@ class DifferenceCache:
     def __len__(self):
         return len(self.activation_cache_1)
 
-    def __getitem__(self, index: int):
+    def __getitem__(self, index):
         return self.activation_cache_1[index] - self.activation_cache_2[index]
+
+
 
     @property
     def tokens(self):
@@ -224,7 +226,7 @@ class SampleCache:
                 cache.tokens[0] == cache.tokens[1]
             ), "Tokens must be the same for PairedActivationCache"
             self._tokens = cache.tokens[0]
-            self.sample_start_indices = cache.activation_cache_1.sample_start_indices
+            self.sample_start_indices = cache.activation_cache_1.sequence_ranges
             assert (
                 not cache.activation_cache_1.config["shuffle_shards"]
                 and not cache.activation_cache_2.config["shuffle_shards"]
@@ -237,7 +239,7 @@ class SampleCache:
             ], "Shuffled shards are not supported for SampleCache"
         elif isinstance(cache, DifferenceCache):
             self._tokens = cache.tokens
-            self.sample_start_indices = cache.activation_cache_1.sample_start_indices
+            self.sample_start_indices = cache.activation_cache_1.sequence_ranges
             assert (
                 not cache.activation_cache_1.config["shuffle_shards"]
                 and not cache.activation_cache_2.config["shuffle_shards"]
@@ -319,9 +321,10 @@ class SampleCache:
         start_index = self.sample_start_indices[index]
         end_index = self.sample_start_indices[index + 1]
         sample_tokens = self._tokens[start_index:end_index]
-        sample_activations = torch.stack(
-            [self.cache[i] for i in range(start_index, end_index)], dim=0
-        )
+        # sample_activations = torch.stack(
+        #     [self.cache[i] for i in range(start_index, end_index)], dim=0
+        # )
+        sample_activations = self.cache[start_index:end_index]
         return sample_tokens, sample_activations
 
 

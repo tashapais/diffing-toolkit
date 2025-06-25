@@ -17,14 +17,14 @@ from tqdm import tqdm
 from transformers import AutoTokenizer
 import streamlit as st
 from nnsight import LanguageModel
+from matplotlib import pyplot as plt
 
 from .diffing_method import DiffingMethod
-from src.utils.activations import get_layer_indices, load_activation_dataset_from_config
+from src.utils.activations import get_layer_indices, load_activation_dataset_from_config, torch_quantile
 from src.utils.configs import get_dataset_configurations, DatasetConfig  
 from src.utils.cache import SampleCache
 from src.utils.max_act_store import MaxActStore
 from src.utils.dashboards import AbstractOnlineDiffingDashboard
-
 
 class SampleCacheDataset(Dataset):
     """
@@ -155,12 +155,12 @@ class NormDiffDiffingMethod(DiffingMethod):
         self.logger.info(f"Loaded sample cache: {dataset_cfg.id}, layer {layer} ({len(sample_cache)} samples)")
         return sample_cache, self.tokenizer
         
-    def compute_norm_difference(
+    def compute_norm_difference_and_statistics(
         self, 
         activations: torch.Tensor
     ) -> torch.Tensor:
         """
-        Compute per-token L2 norm difference between base and finetuned activations.
+        Compute per-token L2 norm difference, cosine similarity, and other statistics between base and finetuned activations.
         
         Args:
             activations: Stacked activations [seq_len, 2, activation_dim]
@@ -170,7 +170,6 @@ class NormDiffDiffingMethod(DiffingMethod):
             norm_diffs: L2 norm differences per token [seq_len]
         """
         seq_len, num_models, activation_dim = activations.shape
-        
         # Shape assertions
         assert num_models == 2, f"Expected 2 models (base, finetuned), got {num_models}"
         assert seq_len > 0, f"Expected non-empty sequence, got length {seq_len}"
@@ -178,6 +177,9 @@ class NormDiffDiffingMethod(DiffingMethod):
         # Extract base and finetuned activations
         base_activations = activations[:, 0, :]  # [seq_len, activation_dim]
         finetuned_activations = activations[:, 1, :]  # [seq_len, activation_dim]
+        norm_base = torch.norm(base_activations, p=2, dim=-1) # [seq_len]
+        norm_finetuned = torch.norm(finetuned_activations, p=2, dim=-1) # [seq_len]
+        cos_sim = torch.nn.functional.cosine_similarity(base_activations, finetuned_activations, dim=-1) # [seq_len]
         
         # Shape assertions for extracted activations
         assert base_activations.shape == (seq_len, activation_dim), f"Expected: {(seq_len, activation_dim)}, got: {base_activations.shape}"
@@ -191,8 +193,12 @@ class NormDiffDiffingMethod(DiffingMethod):
         
         # Shape assertion for norm differences
         assert norm_diffs.shape == (seq_len,), f"Expected: {(seq_len,)}, got: {norm_diffs.shape}"
+        assert cos_sim.shape == (seq_len,), f"Expected: {(seq_len,)}, got: {cos_sim.shape}"
+        assert norm_base.shape == (seq_len,), f"Expected: {(seq_len,)}, got: {norm_base.shape}"
+        assert norm_finetuned.shape == (seq_len,), f"Expected: {(seq_len,)}, got: {norm_finetuned.shape}"
+
         
-        return norm_diffs.cpu()
+        return norm_diffs.cpu(), cos_sim.cpu(), norm_base.cpu(), norm_finetuned.cpu()
     
     def compute_statistics(self, all_norm_values: torch.Tensor) -> Dict[str, float]:
         """
@@ -227,6 +233,128 @@ class NormDiffDiffingMethod(DiffingMethod):
                         stats[f'percentile_{p}'] = float(np.percentile(norm_np, p))
         return stats
     
+    def compute_histogram(self, norm_values, norm_name: str, plot_dir: Path, no_outliers: bool = False):
+        """
+        Compute and save a histogram of norm values.
+        """
+    
+        # Compute statistics
+        mean_val = float(torch.mean(norm_values).item())
+        median_val = float(torch.median(norm_values).item())
+        
+        # Remove outliers if specified
+        if no_outliers:
+            # Calculate Q1, Q3, and IQR
+            q1 = torch_quantile(norm_values, 0.25)
+            q3 = torch_quantile(norm_values, 0.75)
+            iqr = q3 - q1
+            
+            # Define outlier bounds
+            lower_bound = q1 - 1.5 * iqr
+            upper_bound = q3 + 1.5 * iqr
+            
+            # Filter out outliers
+            mask = (norm_values >= lower_bound) & (norm_values <= upper_bound)
+            norm_values = norm_values[mask]
+            
+            norm_name = f"{norm_name} (no outliers)"
+
+        # Regular scale histogram
+        plt.hist(norm_values, bins=100)
+        plt.title(f"{norm_name}")
+        plt.suptitle(f"n={len(norm_values):,}", y=0.02, fontsize=10)
+        plt.xlabel(f"{norm_name}")
+        plt.ylabel("Frequency")
+        
+        # Add mean and median lines
+        plt.axvline(mean_val, color='red', linestyle='--', linewidth=2, label=f'Mean: {mean_val:.4f}')
+        plt.axvline(median_val, color='green', linestyle='--', linewidth=2, label=f'Median: {median_val:.4f}')
+        
+        plt.legend()
+        plt.savefig(plot_dir / f"{norm_name.replace(' ', '_')}.png")
+        plt.close()
+
+        # Log scale histogram
+        plt.hist(norm_values, bins=100)
+        plt.title(f"{norm_name} (Log Scale)")
+        plt.suptitle(f"n={len(norm_values):,}", y=0.02, fontsize=10)
+        plt.xlabel(f"{norm_name}")
+        plt.ylabel("Frequency (Log Scale)")
+        plt.yscale('log')
+        
+        # Add mean and median lines
+        plt.axvline(mean_val, color='red', linestyle='--', linewidth=2, label=f'Mean: {mean_val:.4f}')
+        plt.axvline(median_val, color='green', linestyle='--', linewidth=2, label=f'Median: {median_val:.4f}')
+        
+        plt.legend()
+        plt.savefig(plot_dir / f"{norm_name.replace(' ', '_').replace("(", "").replace(")", "")}_log.png", dpi=150, bbox_inches='tight')
+        plt.close()
+
+  
+    def compute_norm_comparison_plot(self, norm_base_values, norm_finetuned_values, plot_dir: Path, no_outliers: bool = False):
+        """
+        Create a comparison plot of base and finetuned activation norms.
+        """
+        if no_outliers:
+            # Calculate Q1, Q3, and IQR
+            q1 = torch_quantile(norm_base_values, 0.25)
+            q3 = torch_quantile(norm_base_values, 0.75)
+            iqr = q3 - q1
+            
+            # Define outlier bounds
+            lower_bound = q1 - 1.5 * iqr
+            upper_bound = q3 + 1.5 * iqr
+            
+            # Filter out outliers
+            mask = (norm_base_values >= lower_bound) & (norm_base_values <= upper_bound)
+            norm_base_values = norm_base_values[mask]
+            norm_finetuned_values = norm_finetuned_values[mask]
+
+        plt.figure(figsize=(10, 6))
+        
+        # Create histograms with different colors
+        plt.hist(norm_base_values, bins=100, alpha=0.7, color='blue', label='Base Model', density=True)
+        plt.hist(norm_finetuned_values, bins=100, alpha=0.7, color='red', label='Finetuned Model', density=True)
+        
+        plt.title("Activation Norm Comparison: Base vs Finetuned")
+        plt.xlabel("Activation Norm")
+        plt.ylabel("Density")
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        plt.savefig(plot_dir / f"norm_base_vs_finetuned{'_no_outliers' if no_outliers else ''}.png", dpi=150, bbox_inches='tight')
+        plt.close()
+
+        # Log scale version
+        plt.figure(figsize=(10, 6))
+        plt.hist(norm_base_values, bins=100, alpha=0.7, color='blue', label='Base Model', density=True)
+        plt.hist(norm_finetuned_values, bins=100, alpha=0.7, color='red', label='Finetuned Model', density=True)
+        
+        plt.title("Activation Norm Comparison: Base vs Finetuned (Log Scale)")
+        plt.xlabel("Activation Norm")
+        plt.ylabel("Density (Log Scale)")
+        plt.yscale('log')
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        plt.savefig(plot_dir / f"norm_base_vs_finetuned{'_no_outliers' if no_outliers else ''}_log.png", dpi=150, bbox_inches='tight')
+        plt.close()
+
+    def compute_plots(self, diff_norm_values, cos_sim_values, norm_base_values, norm_finetuned_values, plot_dir: Path):
+        """
+        Compute and save plots of norm differences, cosine similarities, and other statistics.
+        """
+        self.compute_histogram(diff_norm_values, "Activation Difference Norm", plot_dir, no_outliers=True)
+        self.compute_histogram(diff_norm_values, "Activation Difference Norm", plot_dir)
+        self.compute_histogram(cos_sim_values, "Cosine Similarity", plot_dir)
+        self.compute_histogram(norm_base_values, "Base Activation Norm", plot_dir)
+        self.compute_histogram(norm_base_values, "Base Activation Norm", plot_dir, no_outliers=True)
+        self.compute_histogram(norm_finetuned_values, "Finetuned Activation Norm", plot_dir)
+        self.compute_histogram(norm_finetuned_values, "Finetuned Activation Norm", plot_dir, no_outliers=True)
+        self.compute_norm_comparison_plot(norm_base_values, norm_finetuned_values, plot_dir)
+
+        relative_diff_values = diff_norm_values / (norm_base_values + norm_finetuned_values)
+        self.compute_histogram(relative_diff_values, "Relative Activation Difference Norm", plot_dir)
+        self.compute_histogram(relative_diff_values, "Relative Activation Difference Norm", plot_dir, no_outliers=True)
+
     def process_layer(self, dataset_cfg: DatasetConfig, layer: int) -> Dict[str, Any]:
         """
         Process a single layer for a dataset and compute norm differences.
@@ -247,10 +375,12 @@ class NormDiffDiffingMethod(DiffingMethod):
         num_examples = self.method_cfg.analysis.max_activating_examples.num_examples
         # Use dataset and layer specific database path
         safe_name = dataset_cfg.id.split("/")[-1]
-        dataset_dir = self.results_dir / safe_name
+        dataset_dir = self.results_dir / safe_name / f"layer_{layer}"
         dataset_dir.mkdir(parents=True, exist_ok=True)
+        plot_dir = dataset_dir / "plots"
+        plot_dir.mkdir(parents=True, exist_ok=True)
         max_store = MaxActStore(
-            dataset_dir / f"layer_{layer}_examples.db",
+            dataset_dir / f"examples.db",
             max_examples=num_examples,
             tokenizer=tokenizer
         )
@@ -271,6 +401,9 @@ class NormDiffDiffingMethod(DiffingMethod):
         self.logger.info(f"Using DataLoader with {self.num_workers} workers, batch_size={self.batch_size}")
         
         all_norm_values = []
+        all_cos_sim_values = []
+        all_norm_base_values = []
+        all_norm_finetuned_values = []
         processed_samples = 0
         
         # Process samples in batches using DataLoader
@@ -281,7 +414,7 @@ class NormDiffDiffingMethod(DiffingMethod):
                 activations = activations.to(self.device)
                 
                 # Compute norm differences
-                norm_diffs = self.compute_norm_difference(activations)
+                norm_diffs, cos_sim, norm_base, norm_finetuned = self.compute_norm_difference_and_statistics(activations)
                 
                 # Find max norm difference in this sample
                 max_norm_value = torch.max(norm_diffs).item()
@@ -296,16 +429,24 @@ class NormDiffDiffingMethod(DiffingMethod):
                 
                 # Collect all norm values for statistics
                 all_norm_values.append(norm_diffs)
+                all_cos_sim_values.append(cos_sim)
+                all_norm_base_values.append(norm_base)
+                all_norm_finetuned_values.append(norm_finetuned)
                 processed_samples += 1
         
         # Concatenate all norm values
         if all_norm_values:
-            all_norm_tensor = torch.cat(all_norm_values, dim=0)
+            all_norm_tensor = torch.cat(all_norm_values, dim=0).float()
             self.logger.info(f"Computed norm differences for {len(all_norm_tensor)} tokens from {dataset_cfg.id}, layer {layer}")
             
             # Compute statistics
             statistics = self.compute_statistics(all_norm_tensor)
             total_tokens = len(all_norm_tensor)
+            all_cos_sim_tensor = torch.cat(all_cos_sim_values, dim=0).float()
+            all_norm_base_tensor = torch.cat(all_norm_base_values, dim=0).float()
+            all_norm_finetuned_tensor = torch.cat(all_norm_finetuned_values, dim=0).float()
+
+            self.compute_plots(all_norm_tensor, all_cos_sim_tensor, all_norm_base_tensor, all_norm_finetuned_tensor, plot_dir)
         else:
             self.logger.warning(f"No valid samples found for {dataset_cfg.id}, layer {layer}")
             statistics = {}
@@ -418,9 +559,130 @@ class NormDiffDiffingMethod(DiffingMethod):
             [
                 ("📊 Dataset Statistics", self._render_dataset_statistics),
                 ("🔥 Interactive", lambda: NormDiffOnlineDashboard(self).display()),
+                ("🎨 Plots", lambda: self._render_plots_tab()),
             ],
             "Norm Difference Analysis",
         )
+    
+    
+    def _render_plots_tab(self):
+        """Render the Plots tab displaying all generated plots."""
+        import streamlit as st
+        from pathlib import Path
+
+        selected_layer = st.selectbox("Select Layer", self.layers)
+        
+        # Find all dataset directories
+        dataset_dirs = [d for d in self.results_dir.iterdir() if d.is_dir()]
+        if not dataset_dirs:
+            st.error(f"No datasets found in {self.results_dir}")
+            return
+        
+        st.markdown(f"### Plots - Layer {selected_layer}")
+        
+        # Display plots for each dataset
+        for dataset_dir in dataset_dirs:
+            dataset_name = dataset_dir.name
+            
+            # Find the plots directory for this dataset and layer
+            plots_dir = dataset_dir / f"layer_{selected_layer}" / "plots"
+            
+            if not plots_dir.exists():
+                continue  # Skip datasets without plots for this layer
+            
+            # Find all image files
+            image_extensions = ['.png', '.jpg', '.jpeg', '.svg', '.pdf']
+            image_files = []
+            for ext in image_extensions:
+                image_files.extend(plots_dir.glob(f"*{ext}"))
+            
+            if not image_files:
+                continue  # Skip if no images found
+            
+            # Separate plots into outlier categories
+            with_outliers = []
+            no_outliers = []
+            
+            for image_file in image_files:
+                if "no_outliers" in image_file.name:
+                    no_outliers.append(image_file)
+                else:
+                    with_outliers.append(image_file)
+            
+            # Create expander for this dataset
+            with st.expander(f"{dataset_name} ({len(image_files)} plots)", expanded=True):
+                
+                # With Outliers section
+                if with_outliers:
+                    with st.expander(f"With Outliers (all) ({len(with_outliers)} plots)", expanded=False):
+                        # Display plots in a grid layout
+                        cols_per_row = 2
+                        for i in range(0, len(with_outliers), cols_per_row):
+                            cols = st.columns(cols_per_row)
+                            for j, image_file in enumerate(with_outliers[i:i+cols_per_row]):
+                                if j < len(with_outliers[i:i+cols_per_row]):
+                                    with cols[j]:
+                                        st.markdown(f"**{image_file.name}**")
+                                        
+                                        # Display image based on format
+                                        if image_file.suffix.lower() in ['.png', '.jpg', '.jpeg']:
+                                            try:
+                                                st.image(str(image_file), use_container_width=True)
+                                            except Exception as e:
+                                                st.error(f"Error loading image {image_file.name}: {str(e)}")
+                                        elif image_file.suffix.lower() == '.svg':
+                                            try:
+                                                with open(image_file, 'r') as f:
+                                                    svg_content = f.read()
+                                                st.markdown(svg_content, unsafe_allow_html=True)
+                                            except Exception as e:
+                                                st.error(f"Error loading SVG {image_file.name}: {str(e)}")
+                                        else:
+                                            # For PDF and other formats, provide download link
+                                            st.markdown(f"📄 {image_file.name}")
+                                            with open(image_file, 'rb') as f:
+                                                st.download_button(
+                                                    label=f"Download {image_file.name}",
+                                                    data=f.read(),
+                                                    file_name=image_file.name,
+                                                    mime="application/octet-stream"
+                                                )
+                
+                # No Outliers section
+                if no_outliers:
+                    with st.expander(f"No outliers ({len(no_outliers)} plots)", expanded=False):
+                        # Display plots in a grid layout
+                        cols_per_row = 2
+                        for i in range(0, len(no_outliers), cols_per_row):
+                            cols = st.columns(cols_per_row)
+                            for j, image_file in enumerate(no_outliers[i:i+cols_per_row]):
+                                if j < len(no_outliers[i:i+cols_per_row]):
+                                    with cols[j]:
+                                        st.markdown(f"**{image_file.name}**")
+                                        
+                                        # Display image based on format
+                                        if image_file.suffix.lower() in ['.png', '.jpg', '.jpeg']:
+                                            try:
+                                                st.image(str(image_file), use_container_width=True)
+                                            except Exception as e:
+                                                st.error(f"Error loading image {image_file.name}: {str(e)}")
+                                        elif image_file.suffix.lower() == '.svg':
+                                            try:
+                                                with open(image_file, 'r') as f:
+                                                    svg_content = f.read()
+                                                st.markdown(svg_content, unsafe_allow_html=True)
+                                            except Exception as e:
+                                                st.error(f"Error loading SVG {image_file.name}: {str(e)}")
+                                        else:
+                                            # For PDF and other formats, provide download link
+                                            st.markdown(f"📄 {image_file.name}")
+                                            with open(image_file, 'rb') as f:
+                                                st.download_button(
+                                                    label=f"Download {image_file.name}",
+                                                    data=f.read(),
+                                                    file_name=image_file.name,
+                                                    mime="application/octet-stream"
+                                                )
     
     def _render_dataset_statistics(self):
         """Render the dataset statistics tab using MaxActivationDashboardComponent."""

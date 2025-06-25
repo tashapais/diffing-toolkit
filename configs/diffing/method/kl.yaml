@@ -3,8 +3,8 @@ name: kl
 
 # Method parameters
 method_params:
-  batch_size: 4
-  max_samples: 1000  # Process entire dataset if None
+  batch_size: 8
+  max_samples: 100000  # Process entire dataset if None
   max_tokens_per_sample: 1024
   temperature: 1.0  # Temperature for KL computation
   ignore_padding: true
@@ -33,10 +33,4 @@ analysis:
     num_examples: 100  # Number of max activating examples to export
     include_full_messages: true
     include_all_token_kls: true
-    
-# Output configuration
-output:
-  save_raw_divergences: false  # Can be memory intensive
-  save_aggregated_stats: true
-  save_max_examples: true
-  output_format: ["json", "pt"]  # JSON for stats, PT for tensors
+  

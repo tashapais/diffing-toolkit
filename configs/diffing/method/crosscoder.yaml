@@ -5,8 +5,8 @@ name: crosscoder
 training:
   expansion_factor: 32
   batch_size: 2048
-  epochs: 1
-  lr: 1e-3
+  epochs: 2
+  lr: 1e-4
   max_steps: null  # Auto-calculate from dataset size
   validate_every_n_steps: 10000
   mu: 1e-1  # L1 penalty for ReLU type
@@ -16,8 +16,8 @@ training:
   auxk_alpha: 0.03125  # 1/32
   
   # Data configuration
-  num_samples: 100_000_000
-  num_validation_samples: 2_000_000
+  num_samples: 150_000_000
+  num_validation_samples: 5_000_000
   local_shuffling: true
   local_shuffling_shard_size: 1_000_000
   workers: 16
@@ -30,7 +30,7 @@ datasets:
   use_training_dataset: true
   normalization:
     enabled: true
-    target_variance: 10.0
+    target_rms: 200.0
 
 # Model configuration
 model:

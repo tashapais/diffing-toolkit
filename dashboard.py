@@ -53,7 +53,7 @@ def discover_organisms() -> List[str]:
 def discover_methods() -> List[str]:
     """Discover available diffing methods from the configs directory."""
     method_configs = Path("configs/diffing/method").glob("*.yaml")
-    methods = [f.stem for f in method_configs if f.stem != "example"]
+    methods = [f.stem for f in method_configs]
     return methods
 
 

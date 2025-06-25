@@ -12,7 +12,7 @@ from src.diffing.methods.normdiff import NormDiffDiffingMethod
 from src.diffing.methods.crosscoder import CrosscoderDiffingMethod
 from src.diffing.methods.sae_difference import SAEDifferenceMethod
 from src.diffing.methods.diffing_method import DiffingMethod
-
+from src.diffing.methods.pca import PCAMethod
 
 def get_method_class(method_name: str) -> DiffingMethod:
     """Get the appropriate method class for a given method name."""
@@ -24,6 +24,8 @@ def get_method_class(method_name: str) -> DiffingMethod:
         return CrosscoderDiffingMethod
     elif method_name == "sae_difference":
         return SAEDifferenceMethod
+    elif method_name == "pca":
+        return PCAMethod
     else:
         raise ValueError(f"Unknown method: {method_name}")
 

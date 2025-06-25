@@ -3,9 +3,9 @@ name: normdiff
 
 # Method parameters
 method_params:
-  max_samples: null  # Process entire dataset if None
-  batch_size: 32  # Batch size for DataLoader (number of samples loaded in parallel)
-  num_workers: 2  # Number of worker processes for DataLoader
+  max_samples: 50000  # Process entire dataset if None
+  batch_size: 4  # Batch size for DataLoader (number of samples loaded in parallel)
+  num_workers: 4  # Number of worker processes for DataLoader
   
 datasets:
   use_chat_dataset: true

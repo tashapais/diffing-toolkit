@@ -558,14 +558,17 @@ def compute_scalers(
     encode_activation_fn = identity_fn
     if isinstance(dict_model, BatchTopKSAE):
         # Deal with BatchTopKSAE
-        logger.debug(
-            "BatchTopKSAE detected, using load_ft_activation as encode_activation_fn"
-        )
         if is_difference_sae:
+            logger.debug(
+                "BatchTopKSAE on difference detected, using load_difference_activation as encode_activation_fn"
+            )
             encode_activation_fn = partial(
                 load_difference_activation, sae_model=sae_model
             )
         else:
+            logger.debug(
+                "BatchTopKSAE on ft detected, using load_ft_activation as encode_activation_fn"
+            )
             encode_activation_fn = load_ft_activation
 
     computations = []

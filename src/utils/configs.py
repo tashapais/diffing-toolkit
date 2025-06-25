@@ -19,7 +19,7 @@ class ModelConfig:
     token_level_replacement: dict = None
     text_column: str = "text"
     base_model_id: str = None
-    dtype: str = "bfloat16"
+    dtype: str = "float32"
 
 
 @dataclass
@@ -42,14 +42,14 @@ def create_model_config(
     return ModelConfig(
         name=name_override or model_cfg.name,
         model_id=model_cfg.model_id,
-        attn_implementation=model_cfg.get("attn_implementation", "eager"),
+        attn_implementation=model_cfg.get("attn_implementation"),
         ignore_first_n_tokens_per_sample=model_cfg.get(
             "ignore_first_n_tokens_per_sample", 0
         ),
         token_level_replacement=model_cfg.get("token_level_replacement", None),
         text_column=model_cfg.get("text_column", "text"),
-        base_model_id=model_cfg.get("base_model_id", None),
-        dtype=model_cfg.get("dtype", "bfloat16"),
+        base_model_id=model_cfg.get("base_model_id"),
+        dtype=model_cfg.get("dtype"),
     )
 
 

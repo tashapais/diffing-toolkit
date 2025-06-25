@@ -1,6 +1,9 @@
 .runinstructions
 playground.ipynb
 test.py
+run.sh
+
+*.png
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
