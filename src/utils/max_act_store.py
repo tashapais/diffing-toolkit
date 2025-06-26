@@ -13,6 +13,292 @@ from pathlib import Path
 from typing import Dict, List, Any, Optional, Tuple
 from tqdm import tqdm
 from loguru import logger
+import multiprocessing as mp
+import queue
+import time
+import threading
+from dataclasses import dataclass
+from enum import Enum
+
+
+class WriteCommand(Enum):
+    ADD_BATCH = "add_batch"
+    MAINTAIN_TOP_K = "maintain_top_k"
+    SHUTDOWN = "shutdown"
+    FLUSH = "flush"
+
+
+@dataclass
+class BatchData:
+    """Data structure for batch examples to be written."""
+    scores_per_example: np.ndarray
+    input_ids_batch: List[List[int]]  # List of token lists (after attention mask applied)
+    scores_per_token_batch: Optional[List[np.ndarray]]
+    additional_data_batch: Optional[List[dict]]
+    latent_idx: Optional[int]
+    quantile_idx: Optional[int]
+    dataset_name: Optional[str]
+
+
+@dataclass
+class WriteRequest:
+    """Request sent to background writer process."""
+    command: WriteCommand
+    data: Optional[BatchData] = None
+    response_queue: Optional[mp.Queue] = None
+
+
+class AsyncMaxActStoreWriter:
+    """
+    Asynchronous writer for MaxActStore that handles database writes in a background process.
+    
+    This dramatically improves performance by:
+    1. Buffering multiple batches before writing to database
+    2. Performing database I/O in separate process
+    3. Deferring top-k maintenance until necessary
+    """
+    
+    def __init__(self, db_path: Path, max_examples: Optional[int] = None, 
+                 tokenizer=None, storage_format: str = 'sparse', 
+                 per_dataset: bool = False, buffer_size: int = 1000, 
+                 flush_interval: float = 30.0, auto_maintain_top_k: bool = True):
+        """
+        Initialize async writer.
+        
+        Args:
+            db_path: Path to SQLite database file
+            max_examples: Maximum number of examples to keep
+            tokenizer: Optional tokenizer for text decoding
+            storage_format: Storage format ('sparse' or 'dense')
+            per_dataset: If True, maintain max_examples per dataset
+            buffer_size: Number of examples to buffer before writing
+            flush_interval: Time interval (seconds) to force flush
+            auto_maintain_top_k: Whether to automatically maintain top-k
+        """
+        self.db_path = Path(db_path)
+        self.max_examples = max_examples
+        self.tokenizer = tokenizer
+        self.storage_format = storage_format
+        self.per_dataset = per_dataset
+        self.buffer_size = buffer_size
+        self.flush_interval = flush_interval
+        self.auto_maintain_top_k = auto_maintain_top_k
+        
+        # Create directory if it doesn't exist
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        # Communication with background process
+        self.request_queue = mp.Queue()
+        self.error_queue = mp.Queue()
+        self.writer_process = None
+        self.is_running = False
+        
+        # Buffer for accumulating batches
+        self.buffer = []
+        self.buffer_count = 0
+        self.last_flush_time = time.time()
+        
+        # Lock for thread safety
+        self._lock = threading.Lock()
+    
+    def start(self):
+        """Start the background writer process."""
+        if self.is_running:
+            return
+            
+        self.writer_process = mp.Process(
+            target=self._writer_worker,
+            args=(
+                self.request_queue, self.error_queue, self.db_path,
+                self.max_examples, self.storage_format, self.per_dataset,
+                self.tokenizer
+            )
+        )
+        self.writer_process.start()
+        self.is_running = True
+        logger.info(f"Started async writer process for {self.db_path}")
+    
+    def stop(self, timeout: float = 60.0):
+        """Stop the background writer process and wait for completion."""
+        if not self.is_running:
+            return
+            
+        try:
+            # Flush any remaining data
+            self._flush_buffer()
+            
+            # Send shutdown command
+            self.request_queue.put(WriteRequest(WriteCommand.SHUTDOWN))
+            
+            # Wait for process to finish
+            if self.writer_process:
+                self.writer_process.join(timeout=timeout)
+                if self.writer_process.is_alive():
+                    logger.warning("Writer process didn't finish gracefully, terminating...")
+                    self.writer_process.terminate()
+                    self.writer_process.join(timeout=5.0)
+                    if self.writer_process.is_alive():
+                        logger.error("Writer process couldn't be terminated, killing...")
+                        self.writer_process.kill()
+        finally:
+            self.is_running = False
+            self.writer_process = None
+            logger.info("Stopped async writer process")
+    
+    def add_batch_examples(self, scores_per_example: torch.Tensor,
+                          input_ids_batch: torch.Tensor,
+                          attention_mask_batch: Optional[torch.Tensor] = None,
+                          scores_per_token_batch: Optional[torch.Tensor] = None,
+                          additional_data_batch: Optional[List[dict]] = None,
+                          latent_idx: Optional[int] = None,
+                          quantile_idx: Optional[int] = None,
+                          dataset_name: Optional[str] = None) -> None:
+        """
+        Add batch examples to buffer for background writing.
+        
+        Args:
+            scores_per_example: Scores tensor [batch_size]
+            input_ids_batch: Token IDs tensor [batch_size, seq_len]
+            attention_mask_batch: Attention masks [batch_size, seq_len] (optional)
+            scores_per_token_batch: Per-token scores [batch_size, seq_len] (optional)
+            additional_data_batch: List of additional metadata dicts (optional)
+            latent_idx: Latent feature index (optional)
+            quantile_idx: Quantile index (optional)
+            dataset_name: Dataset name (optional)
+        """
+        if not self.is_running:
+            raise RuntimeError("AsyncMaxActStoreWriter is not running. Call start() first.")
+        
+        # Check for errors from background process
+        self._check_for_errors()
+        
+        batch_size = scores_per_example.shape[0]
+        
+        # Process each example in the batch and apply attention mask
+        processed_input_ids = []
+        processed_scores_per_token = []
+        
+        for i in range(batch_size):
+            input_ids = input_ids_batch[i]
+            
+            # Apply attention mask if provided
+            if attention_mask_batch is not None:
+                valid_mask = attention_mask_batch[i].bool()
+                input_ids = input_ids[valid_mask]
+                scores_per_token = scores_per_token_batch[i][valid_mask] if scores_per_token_batch is not None else None
+            else:
+                scores_per_token = scores_per_token_batch[i] if scores_per_token_batch is not None else None
+            
+            processed_input_ids.append(input_ids.cpu().tolist())
+            if scores_per_token is not None:
+                processed_scores_per_token.append(scores_per_token.cpu().numpy())
+            else:
+                processed_scores_per_token.append(None)
+        
+        # Create batch data
+        batch_data = BatchData(
+            scores_per_example=scores_per_example.cpu().numpy(),
+            input_ids_batch=processed_input_ids,
+            scores_per_token_batch=processed_scores_per_token if any(x is not None for x in processed_scores_per_token) else None,
+            additional_data_batch=additional_data_batch,
+            latent_idx=latent_idx,
+            quantile_idx=quantile_idx,
+            dataset_name=dataset_name
+        )
+        
+        with self._lock:
+            self.buffer.append(batch_data)
+            self.buffer_count += batch_size
+            
+            # Check if we should flush
+            should_flush = (
+                self.buffer_count >= self.buffer_size or
+                time.time() - self.last_flush_time >= self.flush_interval
+            )
+            
+            if should_flush:
+                self._flush_buffer()
+    
+    def _flush_buffer(self):
+        """Flush the current buffer to the background writer (thread-unsafe)."""
+        if not self.buffer:
+            return
+            
+        # Send all buffered data to background process
+        for batch_data in self.buffer:
+            request = WriteRequest(WriteCommand.ADD_BATCH, data=batch_data)
+            self.request_queue.put(request)
+        
+        # Clear buffer
+        self.buffer.clear()
+        self.buffer_count = 0
+        self.last_flush_time = time.time()
+        
+        # Trigger top-k maintenance if enabled
+        if self.auto_maintain_top_k:
+            self.request_queue.put(WriteRequest(WriteCommand.MAINTAIN_TOP_K))
+    
+    def flush(self):
+        """Force flush any buffered data."""
+        with self._lock:
+            self._flush_buffer()
+    
+    def _check_for_errors(self):
+        """Check if background process has reported any errors."""
+        try:
+            error = self.error_queue.get_nowait()
+            raise RuntimeError(f"Background writer error: {error}")
+        except queue.Empty:
+            pass
+    
+    def __enter__(self):
+        """Context manager entry."""
+        self.start()
+        return self
+    
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Context manager exit."""
+        self.stop()
+    
+    @staticmethod
+    def _writer_worker(request_queue: mp.Queue, error_queue: mp.Queue, 
+                      db_path: Path, max_examples: Optional[int], 
+                      storage_format: str, per_dataset: bool, tokenizer):
+        """Background worker process that handles database writes."""
+        try:
+            # Create MaxActStore instance in this process
+            store = MaxActStore(
+                db_path=db_path,
+                max_examples=max_examples,
+                tokenizer=tokenizer,
+                storage_format=storage_format,
+                per_dataset=per_dataset
+            )
+            
+            logger.info(f"Background writer started for {db_path}")
+            
+            while True:
+                try:
+                    request = request_queue.get(timeout=1.0)
+                except queue.Empty:
+                    continue
+                
+                if request.command == WriteCommand.SHUTDOWN:
+                    logger.info("Background writer received shutdown command")
+                    break
+                elif request.command == WriteCommand.ADD_BATCH:
+                    store._process_batch_data(request.data)
+                elif request.command == WriteCommand.MAINTAIN_TOP_K:
+                    store._maintain_top_k()
+                elif request.command == WriteCommand.FLUSH:
+                    # Just ensure any pending writes are committed
+                    pass
+                
+        except Exception as e:
+            logger.error(f"Background writer error: {e}")
+            error_queue.put(str(e))
+        finally:
+            logger.info("Background writer process finished")
 
 
 class MaxActStore:
@@ -341,6 +627,41 @@ class MaxActStore:
         else:
             raise ValueError(f"Unsupported activation details format. Expected 'dense' or 'sparse', got {self.storage_format}")
 
+    def _process_batch_data(self, batch_data: BatchData) -> None:
+        """
+        Process batch data in the background worker process.
+        
+        Args:
+            batch_data: BatchData instance containing the examples to add
+        """
+        batch_size = len(batch_data.input_ids_batch)
+        
+        for i in range(batch_size):
+            score = float(batch_data.scores_per_example[i])
+            input_ids = torch.tensor(batch_data.input_ids_batch[i])
+            scores_per_token = torch.tensor(batch_data.scores_per_token_batch[i]) if batch_data.scores_per_token_batch and batch_data.scores_per_token_batch[i] is not None else None
+            additional_data = batch_data.additional_data_batch[i] if batch_data.additional_data_batch else None
+            
+            # Generate a unique sequence index
+            sequence_idx = hash(tuple(input_ids.tolist())) % (2**31)
+            
+            # Insert sequence with dataset info
+            self._insert_sequence(sequence_idx, input_ids, 
+                                dataset_name=batch_data.dataset_name)
+            
+            # Insert example
+            example_ids = self._insert_example([(score, sequence_idx, batch_data.latent_idx, batch_data.quantile_idx, additional_data)])
+            
+            # Insert activation details if provided
+            if scores_per_token is not None:
+                if self.storage_format == 'sparse':
+                    positions = np.arange(len(scores_per_token), dtype=np.int32)
+                    values = scores_per_token.float().numpy().astype(np.float32)
+                    self._insert_activation_details([(example_ids[0], positions, values)])
+                elif self.storage_format == 'dense':
+                    values = scores_per_token.numpy().astype(np.float32)
+                    self._insert_activation_details([(example_ids[0], values)])
+
     def _maintain_top_k(self):
         """Remove examples beyond max_examples limit, keeping highest scores."""
         if self.max_examples is None:
@@ -437,8 +758,7 @@ class MaxActStore:
                    additional_data: Optional[dict] = None,
                    maintain_top_k: bool = True,
                    dataset_id: Optional[int] = None,
-                   dataset_name: Optional[str] = None
-                   ) -> None:
+                   dataset_name: Optional[str] = None) -> None:
         """
         Add a single example with top-k management.
         
@@ -480,13 +800,13 @@ class MaxActStore:
             
     def add_batch_examples(self, scores_per_example: torch.Tensor,
                           input_ids_batch: torch.Tensor,
-                          attention_mask_batch: torch.Tensor | None = None,
-                          scores_per_token_batch: torch.Tensor | None = None,
-                          additional_data_batch: List[dict] | None = None,
-                          latent_idx: int | None = None,
-                          quantile_idx: int | None = None) -> None:
+                          attention_mask_batch: Optional[torch.Tensor] = None,
+                          scores_per_token_batch: Optional[torch.Tensor] = None,
+                          additional_data_batch: Optional[List[dict]] = None,
+                          latent_idx: Optional[int] = None,
+                          quantile_idx: Optional[int] = None) -> None:
         """
-        Add multiple examples from a batch with top-k management.
+        Add multiple examples from a batch with top-k management (synchronous version).
         
         Args:
             scores_per_example: Scores tensor [batch_size]
@@ -527,6 +847,31 @@ class MaxActStore:
                 maintain_top_k=False
             )
         self._maintain_top_k()
+
+    def create_async_writer(self, buffer_size: int = 1000, 
+                           flush_interval: float = 30.0, 
+                           auto_maintain_top_k: bool = True) -> AsyncMaxActStoreWriter:
+        """
+        Create an async writer for this store.
+        
+        Args:
+            buffer_size: Number of examples to buffer before writing
+            flush_interval: Time interval (seconds) to force flush
+            auto_maintain_top_k: Whether to automatically maintain top-k
+            
+        Returns:
+            AsyncMaxActStoreWriter instance
+        """
+        return AsyncMaxActStoreWriter(
+            db_path=self.db_path,
+            max_examples=self.max_examples,
+            tokenizer=self.tokenizer,
+            storage_format=self.storage_format,
+            per_dataset=self.per_dataset,
+            buffer_size=buffer_size,
+            flush_interval=flush_interval,
+            auto_maintain_top_k=auto_maintain_top_k
+        )
     
     def fill(self, examples_data: Dict, all_sequences: List, 
              activation_details: Optional[Dict] = None,

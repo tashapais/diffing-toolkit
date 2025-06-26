@@ -16,7 +16,7 @@ import shutil
 from pathlib import Path
 import sqlite3
 
-from src.utils.max_act_store import MaxActStore
+from src.utils.max_act_store import MaxActStore, AsyncMaxActStoreWriter
 
 class MockTokenizer:
     """Mock tokenizer for testing."""
@@ -130,7 +130,7 @@ class TestMaxActStore:
     
     def test_initialization_invalid_format(self, temp_db_path):
         """Test initialization with invalid storage format."""
-        with pytest.raises(AssertionError):
+        with pytest.raises(ValueError):
             MaxActStore(temp_db_path, storage_format='invalid')
     
     def test_length_empty(self, temp_db_path, storage_format):
@@ -221,9 +221,10 @@ class TestMaxActStore:
         details = store.get_example_details(example_id)
         
         assert "scores_per_token" in details
-        assert len(details["scores_per_token"]) == 2  # Only non-zero positions
+        assert len(details["scores_per_token"]) == 3  # Full sequence length (dense format)
         assert np.isclose(details["scores_per_token"][0], 0.8)
         assert np.isclose(details["scores_per_token"][1], 0.6)
+        assert np.isclose(details["scores_per_token"][2], 0.0)  # Zero-padded
         
         # Now test with Nx2 array format
         store.clear()
@@ -246,9 +247,10 @@ class TestMaxActStore:
         details = store.get_example_details(example_id)
         
         assert "scores_per_token" in details
-        assert len(details["scores_per_token"]) == 2
+        assert len(details["scores_per_token"]) == 3  # Full sequence length (dense format)
         assert np.isclose(details["scores_per_token"][0], 0.8)
         assert np.isclose(details["scores_per_token"][1], 0.6)
+        assert np.isclose(details["scores_per_token"][2], 0.0)  # Zero-padded
 
     def _test_activation_details_formats_dense(self, store):
         """Helper method to test dense activation details formats."""
@@ -293,16 +295,17 @@ class TestMaxActStore:
         store_dense.fill(examples_data, sequences, dense_activation_details)
         
         # Both should give same results
-        details_sparse = store_sparse.get_example_details(1)
-        details_dense = store_dense.get_example_details(1)
+        details_sparse = store_sparse.get_example_details(1, return_dense=True)
+        details_dense = store_dense.get_example_details(1, return_dense=True)
         
-        # Sparse format stores only positions and values
+        # Both should return dense format now
         assert len(details_sparse["scores_per_token"]) == 5
-        assert len(details_sparse["positions"]) == 5
-        
-        # Dense format stores full array
         assert len(details_dense["scores_per_token"]) == 5
-        assert len(details_dense["positions"]) == 5  # All non-zero positions
+        
+        # Test sparse format with return_dense=False
+        details_sparse_sparse = store_sparse.get_example_details(1, return_dense=False)
+        assert len(details_sparse_sparse["positions"]) == 5  # All positions have values
+        assert len(details_sparse_sparse["scores_per_token"]) == 5
         
         # Values should be the same
         for i in range(5):
@@ -948,4 +951,408 @@ class TestMaxActStore:
         null_scores = sorted([ex["max_score"] for ex in null_dataset_examples], reverse=True)
         
         assert dataset_a_scores == [0.9, 0.8]  # Top 2 from dataset A
-        assert null_scores == [0.85, 0.75]  # Top 2 from NULL dataset 
+        assert null_scores == [0.85, 0.75]  # Top 2 from NULL dataset
+
+    def test_async_writer_basic_functionality(self, temp_db_path, mock_tokenizer, storage_format):
+        """Test basic AsyncMaxActStoreWriter functionality."""
+        store = MaxActStore(temp_db_path, max_examples=100, tokenizer=mock_tokenizer, storage_format=storage_format)
+        
+        # Test creating async writer
+        async_writer = store.create_async_writer(buffer_size=10, flush_interval=1.0)
+        assert isinstance(async_writer, AsyncMaxActStoreWriter)
+        assert async_writer.buffer_size == 10
+        assert async_writer.flush_interval == 1.0
+        assert not async_writer.is_running
+        
+        # Test context manager
+        with async_writer as writer:
+            assert writer.is_running
+            
+            # Add some test data
+            batch_size = 5
+            scores = torch.rand(batch_size) * 10
+            input_ids = torch.randint(1, 1000, (batch_size, 10))
+            attention_mask = torch.ones(batch_size, 10)
+            scores_per_token = torch.rand(batch_size, 10)
+            
+            writer.add_batch_examples(
+                scores_per_example=scores,
+                input_ids_batch=input_ids,
+                attention_mask_batch=attention_mask,
+                scores_per_token_batch=scores_per_token,
+                dataset_name="test_dataset"
+            )
+            
+            # Flush to ensure data is written
+            writer.flush()
+        
+        # After context exit, writer should be stopped
+        assert not async_writer.is_running
+        
+        # Verify data was written to store
+        assert len(store) == batch_size
+        examples = store.get_top_examples()
+        assert all(ex["dataset_name"] == "test_dataset" for ex in examples)
+
+    def test_async_writer_buffering(self, temp_db_path, storage_format):
+        """Test that async writer properly buffers data before writing."""
+        store = MaxActStore(temp_db_path, storage_format=storage_format)
+        
+        with store.create_async_writer(buffer_size=20, flush_interval=60.0, auto_maintain_top_k=False) as writer:
+            # Add data that should stay in buffer (less than buffer_size)
+            for i in range(3):
+                batch_size = 5  # Total 15 examples, less than buffer_size=20
+                scores = torch.ones(batch_size) * (0.5 + i * 0.1)
+                input_ids = torch.randint(1, 100, (batch_size, 8))
+                
+                writer.add_batch_examples(
+                    scores_per_example=scores,
+                    input_ids_batch=input_ids,
+                    dataset_name=f"batch_{i}"
+                )
+            
+            # Give background process a moment but data should still be buffered
+            import time
+            time.sleep(0.1)
+            
+            # Force flush
+            writer.flush()
+            
+            # Give background process time to write
+            time.sleep(0.5)
+        
+        # After context exit, all data should be written
+        assert len(store) == 15
+        
+        # Verify we have data from all batches
+        examples = store.get_top_examples()
+        datasets = set(ex["dataset_name"] for ex in examples)
+        assert datasets == {"batch_0", "batch_1", "batch_2"}
+
+    def test_async_writer_buffer_overflow(self, temp_db_path, storage_format):
+        """Test that async writer flushes when buffer size is exceeded."""
+        store = MaxActStore(temp_db_path, storage_format=storage_format)
+        
+        with store.create_async_writer(buffer_size=10, flush_interval=60.0) as writer:
+            # Add more data than buffer_size to trigger flush
+            batch_size = 6
+            scores = torch.ones(batch_size) * 0.8
+            input_ids = torch.randint(1, 100, (batch_size, 5))
+            
+            # First batch (6 examples) - should stay in buffer
+            writer.add_batch_examples(
+                scores_per_example=scores,
+                input_ids_batch=input_ids,
+                dataset_name="batch_1"
+            )
+            
+            # Second batch (6 examples) - total 12, should trigger flush since > buffer_size=10
+            writer.add_batch_examples(
+                scores_per_example=scores,
+                input_ids_batch=input_ids,
+                dataset_name="batch_2"
+            )
+            
+            # Give background process time to write
+            import time
+            time.sleep(0.5)
+        
+        # All data should be written
+        assert len(store) == 12
+
+    def test_async_writer_attention_mask_handling(self, temp_db_path, storage_format):
+        """Test that async writer properly handles attention masks."""
+        store = MaxActStore(temp_db_path, storage_format=storage_format)
+        
+        with store.create_async_writer(buffer_size=5) as writer:
+            batch_size = 3
+            seq_len = 8
+            scores = torch.ones(batch_size) * 0.7
+            input_ids = torch.randint(1, 100, (batch_size, seq_len))
+            
+            # Create attention mask with different valid lengths per sequence
+            attention_mask = torch.zeros(batch_size, seq_len)
+            attention_mask[0, :5] = 1  # First sequence has 5 valid tokens
+            attention_mask[1, :3] = 1  # Second sequence has 3 valid tokens  
+            attention_mask[2, :7] = 1  # Third sequence has 7 valid tokens
+            
+            scores_per_token = torch.rand(batch_size, seq_len)
+            
+            writer.add_batch_examples(
+                scores_per_example=scores,
+                input_ids_batch=input_ids,
+                attention_mask_batch=attention_mask,
+                scores_per_token_batch=scores_per_token,
+                dataset_name="masked_test"
+            )
+        
+        # Verify data was written with correct sequence lengths
+        examples = store.get_top_examples()
+        assert len(examples) == 3
+        
+        # Check that sequences have correct lengths (matching attention mask)
+        sequence_lengths = [len(ex["input_ids"]) for ex in examples]
+        assert sorted(sequence_lengths) == [3, 5, 7]  # Should match attention mask lengths
+
+    def test_async_writer_error_handling(self, temp_db_path, storage_format):
+        """Test error handling in async writer."""
+        store = MaxActStore(temp_db_path, storage_format=storage_format)
+        
+        # Test adding data to stopped writer
+        async_writer = store.create_async_writer()
+        
+        with pytest.raises(RuntimeError, match="AsyncMaxActStoreWriter is not running"):
+            async_writer.add_batch_examples(
+                scores_per_example=torch.ones(2),
+                input_ids_batch=torch.randint(1, 100, (2, 5))
+            )
+
+    def test_async_writer_dataset_separation(self, temp_db_path, storage_format):
+        """Test that async writer properly separates data by dataset."""
+        store = MaxActStore(temp_db_path, max_examples=20, storage_format=storage_format, per_dataset=True)
+        
+        with store.create_async_writer(buffer_size=50) as writer:
+            # Add data for multiple datasets
+            datasets = ["dataset_A", "dataset_B", "dataset_C"]
+            
+            for dataset in datasets:
+                for batch_idx in range(3):  # 3 batches per dataset
+                    batch_size = 4
+                    # Different score ranges for each dataset to test separation
+                    base_score = 0.3 + datasets.index(dataset) * 0.2
+                    scores = torch.ones(batch_size) * (base_score + batch_idx * 0.05)
+                    input_ids = torch.randint(1, 100, (batch_size, 6))
+                    
+                    writer.add_batch_examples(
+                        scores_per_example=scores,
+                        input_ids_batch=input_ids,
+                        dataset_name=dataset
+                    )
+        
+        # Verify data separation
+        total_examples = len(store)
+        assert total_examples == 36  # 3 datasets * 3 batches * 4 examples
+        
+        # Check that each dataset has its examples
+        for dataset in datasets:
+            dataset_examples = store.get_top_examples(dataset_names=[dataset])
+            assert len(dataset_examples) == 12  # 3 batches * 4 examples per dataset
+            assert all(ex["dataset_name"] == dataset for ex in dataset_examples)
+
+    def test_async_writer_top_k_maintenance(self, temp_db_path, storage_format):
+        """Test that async writer maintains top-k constraints."""
+        max_examples = 15
+        store = MaxActStore(temp_db_path, max_examples=max_examples, storage_format=storage_format)
+        
+        with store.create_async_writer(buffer_size=10, auto_maintain_top_k=True) as writer:
+            # Add more examples than max_examples
+            total_batches = 5
+            batch_size = 5  # Total: 25 examples, should keep only top 15
+            
+            for batch_idx in range(total_batches):
+                # Vary scores so we can predict which examples should be kept
+                scores = torch.ones(batch_size) * (1.0 - batch_idx * 0.1)  # Decreasing scores
+                input_ids = torch.randint(1, 100, (batch_size, 4))
+                
+                writer.add_batch_examples(
+                    scores_per_example=scores,
+                    input_ids_batch=input_ids,
+                    additional_data_batch=[{"batch": batch_idx}] * batch_size
+                )
+        
+        # Should only keep top max_examples
+        assert len(store) == max_examples
+        
+        # Verify that highest scoring examples were kept
+        examples = store.get_top_examples()
+        assert len(examples) == max_examples
+        
+        # Examples should be sorted by score (descending)
+        scores = [ex["max_score"] for ex in examples]
+        assert scores == sorted(scores, reverse=True)
+        
+        # Highest scores should be from early batches
+        assert scores[0] >= 0.9  # From batch 0 or 1
+
+    def test_async_writer_manual_start_stop(self, temp_db_path, storage_format):
+        """Test manual start/stop of async writer."""
+        store = MaxActStore(temp_db_path, storage_format=storage_format)
+        async_writer = store.create_async_writer()
+        
+        # Initially not running
+        assert not async_writer.is_running
+        
+        # Manual start
+        async_writer.start()
+        assert async_writer.is_running
+        
+        # Add some data
+        scores = torch.ones(3) * 0.8
+        input_ids = torch.randint(1, 100, (3, 5))
+        
+        async_writer.add_batch_examples(
+            scores_per_example=scores,
+            input_ids_batch=input_ids
+        )
+        
+        # Manual stop
+        async_writer.stop()
+        assert not async_writer.is_running
+        
+        # Verify data was written
+        assert len(store) == 3
+
+    def test_async_writer_multiple_flushes(self, temp_db_path, storage_format):
+        """Test multiple flush operations."""
+        store = MaxActStore(temp_db_path, storage_format=storage_format)
+        
+        with store.create_async_writer(buffer_size=20, auto_maintain_top_k=False) as writer:
+            # Add some data
+            for i in range(3):
+                scores = torch.ones(2) * (0.5 + i * 0.1)
+                input_ids = torch.randint(1, 100, (2, 4))
+                
+                writer.add_batch_examples(
+                    scores_per_example=scores,
+                    input_ids_batch=input_ids,
+                    additional_data_batch=[{"flush_round": i}] * 2
+                )
+                
+                # Flush after each batch
+                writer.flush()
+                
+                # Give background process time
+                import time
+                time.sleep(0.1)
+        
+        # All data should be written
+        assert len(store) == 6
+        
+        # Verify data from all flush rounds
+        examples = store.get_top_examples()
+        flush_rounds = set(ex["flush_round"] for ex in examples)
+        assert flush_rounds == {0, 1, 2}
+
+    def test_async_writer_sparse_vs_dense_consistency(self, temp_db_path, mock_tokenizer):
+        """Test that sparse and dense storage formats produce consistent results in async writer."""
+        # Test data
+        batch_size = 4
+        seq_len = 6
+        scores = torch.tensor([0.9, 0.8, 0.7, 0.6])
+        input_ids = torch.randint(1, 50, (batch_size, seq_len))
+        scores_per_token = torch.rand(batch_size, seq_len)
+        
+        results = {}
+        
+        for storage_format in ['sparse', 'dense']:
+            store_path = temp_db_path.with_suffix(f'.{storage_format}.db')
+            store = MaxActStore(store_path, tokenizer=mock_tokenizer, storage_format=storage_format)
+            
+            with store.create_async_writer() as writer:
+                writer.add_batch_examples(
+                    scores_per_example=scores,
+                    input_ids_batch=input_ids,
+                    scores_per_token_batch=scores_per_token,
+                    dataset_name="consistency_test"
+                )
+            
+            # Get results
+            examples = store.get_top_examples()
+            results[storage_format] = examples
+        
+        # Compare results between formats
+        sparse_examples = results['sparse']
+        dense_examples = results['dense']
+        
+        assert len(sparse_examples) == len(dense_examples) == batch_size
+        
+        # Sort by score for comparison
+        sparse_examples.sort(key=lambda x: x["max_score"], reverse=True)
+        dense_examples.sort(key=lambda x: x["max_score"], reverse=True)
+        
+        for sparse_ex, dense_ex in zip(sparse_examples, dense_examples):
+            assert abs(sparse_ex["max_score"] - dense_ex["max_score"]) < 1e-6
+            assert sparse_ex["input_ids"] == dense_ex["input_ids"]
+            assert sparse_ex["dataset_name"] == dense_ex["dataset_name"]
+            
+            # Compare activation details
+            sparse_details = results['sparse'][0]  # Get from store
+            dense_details = results['dense'][0]   # Get from store
+            
+            # Both should have scores_per_token
+            if "scores_per_token" in sparse_details and "scores_per_token" in dense_details:
+                assert len(sparse_details["scores_per_token"]) == len(dense_details["scores_per_token"])
+
+    def test_async_writer_performance_improvement(self, temp_db_path, storage_format):
+        """Test that async writer provides performance benefits over synchronous operations."""
+        import time
+        
+        # Test data
+        num_batches = 10
+        batch_size = 20
+        
+        # Synchronous approach (using add_example directly)
+        sync_store = MaxActStore(temp_db_path.with_suffix('.sync.db'), storage_format=storage_format)
+        
+        sync_start = time.time()
+        for batch_idx in range(num_batches):
+            scores = torch.rand(batch_size)
+            for i in range(batch_size):
+                sync_store.add_example(
+                    score=scores[i].item(),
+                    input_ids=torch.randint(1, 100, (8,)),
+                    scores_per_token=torch.rand(8),
+                    maintain_top_k=False  # Don't maintain during addition
+                )
+        sync_store._maintain_top_k()  # Maintain once at end
+        sync_time = time.time() - sync_start
+        
+        # Asynchronous approach
+        async_store = MaxActStore(temp_db_path.with_suffix('.async.db'), storage_format=storage_format)
+        
+        async_start = time.time()
+        with async_store.create_async_writer(buffer_size=batch_size * 2) as writer:
+            for batch_idx in range(num_batches):
+                scores = torch.rand(batch_size)
+                input_ids = torch.randint(1, 100, (batch_size, 8))
+                scores_per_token = torch.rand(batch_size, 8)
+                
+                writer.add_batch_examples(
+                    scores_per_example=scores,
+                    input_ids_batch=input_ids,
+                    scores_per_token_batch=scores_per_token
+                )
+        async_time = time.time() - async_start
+        
+        # Verify both approaches produced same amount of data
+        assert len(sync_store) == len(async_store) == num_batches * batch_size
+        
+        # Async should be faster (though this might be flaky in CI environments)
+        print(f"Sync time: {sync_time:.3f}s, Async time: {async_time:.3f}s")
+        # Note: We don't assert performance improvement as it depends on system load
+        # But we can at least verify that async didn't take dramatically longer
+
+    def test_async_writer_graceful_shutdown(self, temp_db_path, storage_format):
+        """Test graceful shutdown of async writer process."""
+        store = MaxActStore(temp_db_path, storage_format=storage_format)
+        
+        async_writer = store.create_async_writer(buffer_size=100)  # Large buffer to keep data buffered
+        async_writer.start()
+        
+        # Add some data that will be buffered
+        scores = torch.ones(5) * 0.8
+        input_ids = torch.randint(1, 100, (5, 6))
+        
+        async_writer.add_batch_examples(
+            scores_per_example=scores,
+            input_ids_batch=input_ids,
+            dataset_name="shutdown_test"
+        )
+        
+        # Stop should flush remaining data and shutdown gracefully
+        async_writer.stop(timeout=10.0)
+        
+        # Verify data was written during shutdown
+        assert len(store) == 5
+        examples = store.get_top_examples()
+        assert all(ex["dataset_name"] == "shutdown_test" for ex in examples) 

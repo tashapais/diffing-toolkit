@@ -3,6 +3,8 @@ playground.ipynb
 test.py
 run.sh
 
+run/sweep*
+
 *.png
 # Byte-compiled / optimized / DLL files
 __pycache__/

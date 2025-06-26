@@ -25,7 +25,7 @@ from .diffing_method import DiffingMethod
 from src.utils.configs import get_dataset_configurations, DatasetConfig
 from src.utils.activations import get_layer_indices, load_activation_dataset_from_config
 from src.utils.cache import SampleCache
-from src.utils.max_act_store import MaxActStore
+from src.utils.max_act_store import MaxActStore, AsyncMaxActStoreWriter
 from src.utils.dashboards import AbstractOnlineDiffingDashboard
 
 
@@ -115,19 +115,14 @@ class KLDivergenceDiffingMethod(DiffingMethod):
         batch_size, seq_len = input_ids.shape
 
         with torch.no_grad():
-            
             # Get logits from both models
-            start_time = time.time()
             base_outputs = self.base_model(
                 input_ids=input_ids, attention_mask=attention_mask
             )
             finetuned_outputs = self.finetuned_model(
                 input_ids=input_ids, attention_mask=attention_mask
             )
-            model_inference_time = time.time() - start_time
-            logger.info(f"Model inference time: {model_inference_time:.4f}s")
 
-            start_time = time.time()
             base_logits = base_outputs.logits  # [batch_size, seq_len, vocab_size]
             finetuned_logits = (
                 finetuned_outputs.logits
@@ -136,10 +131,7 @@ class KLDivergenceDiffingMethod(DiffingMethod):
             # Ensure tensors are on the correct device
             base_logits = base_logits.to(self.device)
             finetuned_logits = finetuned_logits.to(self.device)
-            tensor_prep_time = time.time() - start_time
-            logger.info(f"Tensor preparation time: {tensor_prep_time:.4f}s")
 
-            start_time = time.time()
             # Shape assertions for logits
             vocab_size = base_logits.shape[-1]
             assert base_logits.shape == (
@@ -155,19 +147,13 @@ class KLDivergenceDiffingMethod(DiffingMethod):
             assert (
                 base_logits.shape == finetuned_logits.shape
             ), f"Expected: {base_logits.shape}, got: {finetuned_logits.shape}"
-            shape_assert_time = time.time() - start_time
-            logger.info(f"Shape assertion time: {shape_assert_time:.4f}s")
 
-            start_time = time.time()
             # Apply temperature
             temperature = self.method_cfg.method_params.temperature
             if temperature != 1.0:
                 base_logits = base_logits / temperature
                 finetuned_logits = finetuned_logits / temperature
-            temperature_time = time.time() - start_time
-            logger.info(f"Temperature application time: {temperature_time:.4f}s")
 
-            start_time = time.time()
             # Convert to log probabilities
             base_log_probs = F.log_softmax(
                 base_logits, dim=-1
@@ -175,10 +161,7 @@ class KLDivergenceDiffingMethod(DiffingMethod):
             finetuned_log_probs = F.log_softmax(
                 finetuned_logits, dim=-1
             )  # [batch_size, seq_len, vocab_size]
-            log_softmax_time = time.time() - start_time
-            logger.info(f"Log softmax time: {log_softmax_time:.4f}s")
 
-            start_time = time.time()
             # Shape assertions for log probabilities
             assert base_log_probs.shape == (
                 batch_size,
@@ -200,10 +183,7 @@ class KLDivergenceDiffingMethod(DiffingMethod):
                 seq_len,
                 vocab_size,
             ), f"Expected: {(batch_size, seq_len, vocab_size)}, got: {finetuned_probs.shape}"
-            prob_prep_time = time.time() - start_time
-            logger.info(f"Probability preparation time: {prob_prep_time:.4f}s")
 
-            start_time = time.time()
             # Compute KL divergence: KL(finetuned || base) = sum(finetuned * log(finetuned / base))
             # = sum(finetuned * (log_finetuned - log_base))
             kl_div = torch.sum(
@@ -215,19 +195,14 @@ class KLDivergenceDiffingMethod(DiffingMethod):
                 batch_size,
                 seq_len,
             ), f"Expected: {(batch_size, seq_len)}, got: {kl_div.shape}"
-            kl_computation_time = time.time() - start_time
-            logger.info(f"KL computation time: {kl_computation_time:.4f}s")
 
-            start_time = time.time()
             # Compute mean per sample KL (excluding padding tokens) - vectorized version
             # Mask out padding tokens by setting their KL to 0
             masked_kl = kl_div * attention_mask.float()
             assert masked_kl.shape == (batch_size, seq_len), f"Expected: {(batch_size, seq_len)}, got: {masked_kl.shape}"
-            logger.info(f"Masked KL shape: {masked_kl.shape}")
             
             # Sum valid KL values per sample
             kl_sums = torch.sum(masked_kl, dim=1)
-            logger.info(f"KL sums shape: {kl_sums.shape}")
             assert kl_sums.shape == (batch_size,), f"Expected: {(batch_size,)}, got: {kl_sums.shape}"
             # Count valid tokens per sample
             valid_token_counts = torch.sum(attention_mask, dim=1).float()
@@ -242,8 +217,6 @@ class KLDivergenceDiffingMethod(DiffingMethod):
             
             # Shape assertion for mean per sample KL
             assert mean_per_sample_kl_tensor.shape == (batch_size,), f"Expected: {(batch_size,)}, got: {mean_per_sample_kl_tensor.shape}"
-            mean_computation_time = time.time() - start_time
-            logger.info(f"Mean computation time: {mean_computation_time:.4f}s")
 
             return kl_div, mean_per_sample_kl_tensor
 
@@ -253,19 +226,21 @@ class KLDivergenceDiffingMethod(DiffingMethod):
         mean_per_sample_kl: torch.Tensor,
         input_ids: torch.Tensor,
         attention_mask: torch.Tensor,
-        max_store_per_token: MaxActStore,
-        max_store_mean_per_sample: MaxActStore,
+        max_store_per_token_writer,
+        max_store_mean_per_sample_writer,
+        dataset_name: Optional[str] = None,
     ) -> None:
         """
-        Update stores with examples that have high KL divergence.
+        Update stores with examples that have high KL divergence using async writers.
 
         Args:
             per_token_kl: KL divergence per token [batch_size, seq_len]
             mean_per_sample_kl: Mean KL divergence per sample [batch_size]
             input_ids: Token ids [batch_size, seq_len]
             attention_mask: Attention mask [batch_size, seq_len]
-            max_store_per_token: MaxActStore instance for per-token max KL
-            max_store_mean_per_sample: MaxActStore instance for mean per sample KL
+            max_store_per_token_writer: AsyncMaxActStoreWriter for per-token max KL
+            max_store_mean_per_sample_writer: AsyncMaxActStoreWriter for mean per sample KL
+            dataset_name: Dataset name for this batch
         """
         # Find max KL for each example in the batch (for per-token store)
         max_kl_per_example = []
@@ -281,20 +256,22 @@ class KLDivergenceDiffingMethod(DiffingMethod):
         # Convert to tensor for batch processing
         max_kl_tensor = torch.tensor(max_kl_per_example)
 
-        # Update per-token max KL store
-        max_store_per_token.add_batch_examples(
+        # Update per-token max KL store using async writer
+        max_store_per_token_writer.add_batch_examples(
             scores_per_example=max_kl_tensor,
             input_ids_batch=input_ids,
             attention_mask_batch=attention_mask,
             scores_per_token_batch=per_token_kl,
+            dataset_name=dataset_name,
         )
 
-        # Update mean per sample KL store
-        max_store_mean_per_sample.add_batch_examples(
+        # Update mean per sample KL store using async writer
+        max_store_mean_per_sample_writer.add_batch_examples(
             scores_per_example=mean_per_sample_kl,
             input_ids_batch=input_ids,
             attention_mask_batch=attention_mask,
-            scores_per_token_batch=per_token_kl, 
+            scores_per_token_batch=per_token_kl,
+            dataset_name=dataset_name,
         )
 
     def compute_statistics(self, all_kl_values: torch.Tensor) -> Dict[str, float]:
@@ -365,16 +342,16 @@ class KLDivergenceDiffingMethod(DiffingMethod):
     def process_dataset(
         self, 
         dataset_cfg: DatasetConfig, 
-        max_act_store_per_token: MaxActStore,
-        max_act_store_mean_per_sample: MaxActStore
+        max_act_store_per_token_writer,
+        max_act_store_mean_per_sample_writer
     ) -> Dict[str, Any]:
         """
-        Process a single dataset and compute KL divergences.
+        Process a single dataset and compute KL divergences using async writers.
 
         Args:
             dataset_cfg: Dataset configuration
-            max_act_store_per_token: MaxActStore instance for per-token max KL
-            max_act_store_mean_per_sample: MaxActStore instance for mean per sample KL
+            max_act_store_per_token_writer: AsyncMaxActStoreWriter for per-token max KL
+            max_act_store_mean_per_sample_writer: AsyncMaxActStoreWriter for mean per sample KL
         Returns:
             Dictionary containing aggregated statistics and max examples for this dataset
         """
@@ -385,6 +362,7 @@ class KLDivergenceDiffingMethod(DiffingMethod):
 
         # Get all sequences
         sequences = sample_cache.sequences
+        assert sequences is not None, "Sample cache sequences should not be None"
 
         # Apply max_samples limit if specified
         if self.method_cfg.method_params.max_samples is not None:
@@ -398,7 +376,6 @@ class KLDivergenceDiffingMethod(DiffingMethod):
         all_per_token_kl_values = []
         all_mean_per_sample_kl_values = []
         batch_size = self.method_cfg.method_params.batch_size
-
         # Process sequences in batches
         for i in trange(
             0,
@@ -406,39 +383,25 @@ class KLDivergenceDiffingMethod(DiffingMethod):
             batch_size,
             desc=f"Processing batches from {dataset_cfg.id}",
         ):
-            start_time = time.time()
             batch_sequences = sequences[i : i + batch_size]
 
             # Prepare batch tensors
             input_ids, attention_mask = self.prepare_batch(batch_sequences)
 
-            batch_prep_time = time.time() - start_time
-            logger.info(f"Batch preparation time: {batch_prep_time:.4f}s")
-
-            start_time = time.time()
             # Move to device
             input_ids = input_ids.to(self.device)
             attention_mask = attention_mask.to(self.device)
-            device_move_time = time.time() - start_time
-            logger.info(f"Device move time: {device_move_time:.4f}s")
 
-            start_time = time.time()
             # Compute KL divergence
             per_token_kl, mean_per_sample_kl = self.compute_kl_divergence(input_ids, attention_mask)
 
-            kl_computation_time = time.time() - start_time
-            logger.info(f"KL computation time: {kl_computation_time:.4f}s")
-
-            start_time = time.time()
-            # Update max examples stores
+            # Update max examples stores using async writers
             self.update_max_examples_store(
                 per_token_kl, mean_per_sample_kl, input_ids, attention_mask, 
-                max_act_store_per_token, max_act_store_mean_per_sample
+                max_act_store_per_token_writer, max_act_store_mean_per_sample_writer,
+                dataset_name=dataset_cfg.name
             )
-            update_max_examples_store_time = time.time() - start_time
-            logger.info(f"Update max examples store time: {update_max_examples_store_time:.4f}s")
 
-            start_time = time.time()
             # Collect valid KL values (excluding padding)
             valid_mask = attention_mask.flatten().bool()
             valid_per_token_kl_batch = per_token_kl.flatten()[valid_mask]
@@ -446,10 +409,7 @@ class KLDivergenceDiffingMethod(DiffingMethod):
             
             # Collect mean per sample KL values
             all_mean_per_sample_kl_values.append(mean_per_sample_kl)
-            collect_valid_kl_values_time = time.time() - start_time
-            logger.info(f"Collect valid KL values time: {collect_valid_kl_values_time:.4f}s")
 
-            start_time = time.time()
         # Concatenate all KL values
         all_per_token_kl_tensor = torch.cat(all_per_token_kl_values, dim=0)
         all_mean_per_sample_kl_tensor = torch.cat(all_mean_per_sample_kl_values, dim=0)
@@ -498,7 +458,7 @@ class KLDivergenceDiffingMethod(DiffingMethod):
 
     def run(self) -> None:
         """
-        Main execution method for KL divergence diffing.
+        Main execution method for KL divergence diffing using async writers.
 
         Processes each dataset separately and saves results to disk.
         """
@@ -533,13 +493,25 @@ class KLDivergenceDiffingMethod(DiffingMethod):
             per_dataset=True
         )
 
-        # Process each dataset separately
-        for dataset_cfg in self.datasets:
-            # Process dataset
-            results = self.process_dataset(dataset_cfg, max_act_store_per_token, max_act_store_mean_per_sample)
+        # Use async writers with context managers for efficient background writing
+        with max_act_store_per_token.create_async_writer(
+            buffer_size=self.method_cfg.method_params.batch_size * 10,  # Buffer ~10 batches
+            flush_interval=30.0,
+            auto_maintain_top_k=True
+        ) as per_token_writer, \
+        max_act_store_mean_per_sample.create_async_writer(
+            buffer_size=self.method_cfg.method_params.batch_size * 10,
+            flush_interval=30.0,
+            auto_maintain_top_k=True
+        ) as mean_per_sample_writer:
+            
+            # Process each dataset separately
+            for dataset_cfg in self.datasets:
+                # Process dataset using async writers
+                results = self.process_dataset(dataset_cfg, per_token_writer, mean_per_sample_writer)
 
-            # Save results to disk
-            output_file = self.save_results(dataset_cfg.id.split("/")[-1], results)
+                # Save results to disk
+                output_file = self.save_results(dataset_cfg.id.split("/")[-1], results)
 
         self.logger.info("KL divergence computation completed successfully")
         self.logger.info(f"Results saved to: {self.results_dir}")

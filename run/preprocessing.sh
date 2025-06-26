@@ -4,7 +4,7 @@
 # Usage: ./preprocessing.sh <organism> <method> [additional_args...]
 # Example: ./preprocessing.sh kansas_abortion crosscoder pipeline.mode=preprocessing
 
-if [ $# -lt 2 ]; then
+if [ $# -lt 1 ]; then
     echo "Usage: $0 <organism> [additional_args...]"
     echo "Example: $0 kansas_abortion infrastructure=runpod"
     exit 1
@@ -15,4 +15,3 @@ shift 1  # Remove first two arguments
 
 # Run the command with dynamic arguments
 python main.py infrastructure=runpod organism=$ORGANISM pipeline.mode=preprocessing "$@"
-
