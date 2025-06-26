@@ -24,7 +24,7 @@ class MaxActStore:
     2. Real-time storage with top-k management (e.g., during model diffing)
     """
     
-    def __init__(self, db_path: Path, max_examples: Optional[int] = None, tokenizer=None, storage_format: Optional[str] = 'sparse'):
+    def __init__(self, db_path: Path, max_examples: Optional[int] = None, tokenizer=None, storage_format: Optional[str] = 'sparse', per_dataset: bool = False):
         """
         Initialize the store.
         
@@ -33,9 +33,11 @@ class MaxActStore:
             max_examples: Maximum number of examples to keep (None for unlimited)
             tokenizer: Optional tokenizer for text decoding
             storage_format: Storage format for activation details ('sparse', 'dense', or None to read from existing config)
+            per_dataset: If True, maintain max_examples per dataset rather than overall
         """
         self.db_path = Path(db_path)
         self.tokenizer = tokenizer
+        self.per_dataset = per_dataset
         
         # Create directory if it doesn't exist
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -350,39 +352,93 @@ class MaxActStore:
             # Enable foreign key constraints for this connection too
             cursor.execute("PRAGMA foreign_keys = ON")
             
-            # Get current count
-            cursor.execute("SELECT COUNT(*) FROM examples")
-            current_count = cursor.fetchone()[0]
+            if self.per_dataset:
+                # Maintain top-k per dataset
+                self._maintain_top_k_per_dataset(cursor)
+            else:
+                # Maintain top-k overall
+                self._maintain_top_k_overall(cursor)
             
-            if current_count > self.max_examples:
-                # Get example IDs to delete (lowest scores)
-                cursor.execute("""
-                    SELECT example_id FROM examples 
-                    ORDER BY score ASC 
-                    LIMIT ?
-                """, (current_count - self.max_examples,))
+            conn.commit()
+    
+    def _maintain_top_k_overall(self, cursor):
+        """Remove examples beyond max_examples limit overall, keeping highest scores."""
+        # Get current count
+        cursor.execute("SELECT COUNT(*) FROM examples")
+        current_count = cursor.fetchone()[0]
+        
+        if current_count > self.max_examples:
+            # Get example IDs to delete (lowest scores)
+            cursor.execute("""
+                SELECT example_id FROM examples 
+                ORDER BY score ASC 
+                LIMIT ?
+            """, (current_count - self.max_examples,))
+            
+            ids_to_delete = [row[0] for row in cursor.fetchall()]
+            self._delete_examples_by_ids(cursor, ids_to_delete)
+    
+    def _maintain_top_k_per_dataset(self, cursor):
+        """Remove examples beyond max_examples limit per dataset, keeping highest scores within each dataset."""
+        # Get all datasets and their example counts
+        cursor.execute("""
+            SELECT s.dataset_name, COUNT(e.example_id) as count
+            FROM examples e
+            JOIN sequences s ON e.sequence_idx = s.sequence_idx
+            GROUP BY s.dataset_name
+        """)
+        dataset_counts = cursor.fetchall()
+        
+        # Process each dataset that exceeds the limit
+        for dataset_name, count in dataset_counts:
+            if count > self.max_examples:
+                # Get example IDs to delete for this dataset (lowest scores)
+                if dataset_name is None:
+                    # Handle NULL dataset_name case
+                    cursor.execute("""
+                        SELECT e.example_id FROM examples e
+                        JOIN sequences s ON e.sequence_idx = s.sequence_idx
+                        WHERE s.dataset_name IS NULL
+                        ORDER BY e.score ASC 
+                        LIMIT ?
+                    """, (count - self.max_examples,))
+                else:
+                    cursor.execute("""
+                        SELECT e.example_id FROM examples e
+                        JOIN sequences s ON e.sequence_idx = s.sequence_idx
+                        WHERE s.dataset_name = ?
+                        ORDER BY e.score ASC 
+                        LIMIT ?
+                    """, (dataset_name, count - self.max_examples))
                 
                 ids_to_delete = [row[0] for row in cursor.fetchall()]
-                
-                # Delete activation details first (foreign key constraint)
-                cursor.executemany(
-                    "DELETE FROM activation_details WHERE example_id = ?",
-                    [(id_,) for id_ in ids_to_delete]
-                )
-                
-                # Delete examples
-                cursor.executemany(
-                    "DELETE FROM examples WHERE example_id = ?", 
-                    [(id_,) for id_ in ids_to_delete]
-                )
-                
-                conn.commit()
+                self._delete_examples_by_ids(cursor, ids_to_delete)
+    
+    def _delete_examples_by_ids(self, cursor, ids_to_delete):
+        """Helper method to delete examples and their activation details by IDs."""
+        if not ids_to_delete:
+            return
+            
+        # Delete activation details first (foreign key constraint)
+        cursor.executemany(
+            "DELETE FROM activation_details WHERE example_id = ?",
+            [(id_,) for id_ in ids_to_delete]
+        )
+        
+        # Delete examples
+        cursor.executemany(
+            "DELETE FROM examples WHERE example_id = ?", 
+            [(id_,) for id_ in ids_to_delete]
+        )
     
     def add_example(self, score: float, input_ids: torch.Tensor, 
                    scores_per_token: Optional[torch.Tensor] = None,
                    latent_idx: Optional[int] = None, quantile_idx: Optional[int] = None,
                    additional_data: Optional[dict] = None,
-                   maintain_top_k: bool = True) -> None:
+                   maintain_top_k: bool = True,
+                   dataset_id: Optional[int] = None,
+                   dataset_name: Optional[str] = None
+                   ) -> None:
         """
         Add a single example with top-k management.
         
@@ -393,12 +449,15 @@ class MaxActStore:
             latent_idx: Latent feature index (optional)
             quantile_idx: Quantile index (optional)
             additional_data: Additional metadata (optional)
+            maintain_top_k: Whether to maintain the top-k constraint
+            dataset_id: Dataset ID (optional)
+            dataset_name: Dataset name (optional)
         """
         # Generate a unique sequence index
         sequence_idx = hash(tuple(input_ids.cpu().tolist())) % (2**31)
         
         # Insert sequence
-        self._insert_sequence(sequence_idx, input_ids)
+        self._insert_sequence(sequence_idx, input_ids, dataset_id, dataset_name)
         
         # Insert example
         example_ids = self._insert_example([(score, sequence_idx, latent_idx, quantile_idx, additional_data)])
@@ -749,4 +808,228 @@ class MaxActStore:
                             results_dict[example_id]["positions"] = positions
             
             # Return results in the same order as requested
-            return [results_dict[example_id] for example_id in example_ids if example_id in results_dict] 
+            return [results_dict[example_id] for example_id in example_ids if example_id in results_dict]
+
+    def merge(self, source_store: 'MaxActStore', maintain_top_k: bool = True, sequence_idx_offset: Optional[int | str] = None) -> None:
+        """
+        Merge another MaxActStore into this store.
+        
+        Args:
+            source_store: The source store to merge from
+            maintain_top_k: Whether to maintain the top-k constraint after merging
+            sequence_idx_offset: Optional offset to add to all source sequence indices. 
+                               - If None, automatically avoids conflicts by finding next available indices.
+                               - If "auto", uses (max_existing_sequence_idx + 1) as offset.
+                               - If integer, uses that value as offset.
+                               Useful for keeping datasets separated with non-overlapping index ranges.
+        """
+        # Validate storage format compatibility
+        if self.storage_format != source_store.storage_format:
+            raise ValueError(f"Storage format mismatch: target has '{self.storage_format}' but source has '{source_store.storage_format}'")
+        
+        logger.info(f"Merging store from {source_store.db_path} into {self.db_path}")
+        
+        # Get existing sequence indices in target to avoid conflicts
+        with sqlite3.connect(self.db_path) as target_conn:
+            target_cursor = target_conn.cursor()
+            target_cursor.execute("PRAGMA foreign_keys = ON")
+            target_cursor.execute("SELECT sequence_idx FROM sequences")
+            existing_sequence_indices = set(row[0] for row in target_cursor.fetchall())
+        
+        # Read all data from source store
+        with sqlite3.connect(source_store.db_path) as source_conn:
+            source_cursor = source_conn.cursor()
+            source_cursor.execute("PRAGMA foreign_keys = ON")
+            
+            # Get all sequences from source
+            source_cursor.execute("""
+                SELECT sequence_idx, token_ids, text, sequence_length, dataset_id, dataset_name 
+                FROM sequences
+            """)
+            source_sequences = source_cursor.fetchall()
+            
+            # Get all examples from source  
+            source_cursor.execute("""
+                SELECT sequence_idx, score, latent_idx, quantile_idx, metadata
+                FROM examples
+                ORDER BY score DESC
+            """)
+            source_examples = source_cursor.fetchall()
+            
+            # Get all activation details from source
+            if self.storage_format == 'dense':
+                source_cursor.execute("""
+                    SELECT e.sequence_idx, ad.activation_values
+                    FROM activation_details ad
+                    JOIN examples e ON ad.example_id = e.example_id
+                """)
+                source_activation_details = source_cursor.fetchall()
+            else:  # sparse
+                source_cursor.execute("""
+                    SELECT e.sequence_idx, ad.positions, ad.activation_values
+                    FROM activation_details ad
+                    JOIN examples e ON ad.example_id = e.example_id
+                """)
+                source_activation_details = source_cursor.fetchall()
+        
+        if not source_sequences:
+            logger.info("Source store is empty, nothing to merge")
+            return
+        
+        # Create mapping for sequence indices to avoid conflicts
+        sequence_idx_mapping = {}
+        
+        # Handle "auto" offset
+        if sequence_idx_offset == "auto":
+            if existing_sequence_indices:
+                sequence_idx_offset = max(existing_sequence_indices) + 1
+            else:
+                sequence_idx_offset = 0
+            logger.info(f"Auto offset calculated: {sequence_idx_offset}")
+        
+        if sequence_idx_offset is not None:
+            # Use explicit offset for all source indices
+            for source_seq_data in source_sequences:
+                source_seq_idx = source_seq_data[0]
+                new_seq_idx = source_seq_idx + sequence_idx_offset
+                if new_seq_idx in existing_sequence_indices:
+                    raise ValueError(f"Sequence index conflict: {new_seq_idx} (from source {source_seq_idx} + offset {sequence_idx_offset}) already exists in target store")
+                sequence_idx_mapping[source_seq_idx] = new_seq_idx
+                existing_sequence_indices.add(new_seq_idx)
+        else:
+            # Automatically find next available indices
+            next_available_idx = max(existing_sequence_indices) + 1 if existing_sequence_indices else 0
+            
+            for source_seq_data in source_sequences:
+                source_seq_idx = source_seq_data[0]
+                if source_seq_idx in existing_sequence_indices:
+                    # Use next available index
+                    while next_available_idx in existing_sequence_indices:
+                        next_available_idx += 1
+                    sequence_idx_mapping[source_seq_idx] = next_available_idx
+                    existing_sequence_indices.add(next_available_idx)
+                    next_available_idx += 1
+                else:
+                    # Can use original index
+                    sequence_idx_mapping[source_seq_idx] = source_seq_idx
+                    existing_sequence_indices.add(source_seq_idx)
+        
+        # Insert sequences with new indices
+        with sqlite3.connect(self.db_path) as target_conn:
+            target_cursor = target_conn.cursor()
+            target_cursor.execute("PRAGMA foreign_keys = ON")
+            
+            sequences_to_insert = []
+            for source_seq_data in source_sequences:
+                source_seq_idx, token_ids_blob, text, seq_length, dataset_id, dataset_name = source_seq_data
+                new_seq_idx = sequence_idx_mapping[source_seq_idx]
+                sequences_to_insert.append((new_seq_idx, token_ids_blob, text, seq_length, dataset_id, dataset_name))
+            
+            target_cursor.executemany(
+                "INSERT OR REPLACE INTO sequences VALUES (?, ?, ?, ?, ?, ?)",
+                sequences_to_insert
+            )
+            target_conn.commit()
+        
+        # Group activation details by sequence index for efficient lookup
+        activation_details_by_seq = {}
+        if source_activation_details:
+            for detail_data in source_activation_details:
+                if self.storage_format == 'dense':
+                    source_seq_idx, values_blob = detail_data
+                    activation_details_by_seq[source_seq_idx] = (values_blob,)
+                else:  # sparse
+                    source_seq_idx, positions_blob, values_blob = detail_data
+                    activation_details_by_seq[source_seq_idx] = (positions_blob, values_blob)
+        
+        # Insert examples with new sequence indices and collect activation details to insert
+        example_data_to_insert = []
+        activation_details_to_insert = []
+        
+        for source_example_data in tqdm(source_examples, desc="Processing examples"):
+            source_seq_idx, score, latent_idx, quantile_idx, metadata = source_example_data
+            new_seq_idx = sequence_idx_mapping[source_seq_idx]
+            example_data_to_insert.append((score, new_seq_idx, latent_idx, quantile_idx, json.loads(metadata) if metadata else None))
+        
+        # Insert examples in batches and collect their IDs
+        with sqlite3.connect(self.db_path) as target_conn:
+            target_cursor = target_conn.cursor()
+            target_cursor.execute("PRAGMA foreign_keys = ON")
+            
+            example_ids = self._insert_example(example_data_to_insert)
+            
+            # Prepare activation details with new example IDs
+            for i, source_example_data in enumerate(source_examples):
+                source_seq_idx = source_example_data[0]
+                new_seq_idx = sequence_idx_mapping[source_seq_idx]
+                example_id = example_ids[i]
+                
+                if source_seq_idx in activation_details_by_seq:
+                    if self.storage_format == 'dense':
+                        values_blob = activation_details_by_seq[source_seq_idx][0]
+                        values = np.frombuffer(values_blob, dtype=np.float32)
+                        activation_details_to_insert.append((example_id, values))
+                    else:  # sparse
+                        positions_blob, values_blob = activation_details_by_seq[source_seq_idx]
+                        positions = np.frombuffer(positions_blob, dtype=np.int32)
+                        values = np.frombuffer(values_blob, dtype=np.float32)
+                        activation_details_to_insert.append((example_id, positions, values))
+        
+        # Insert activation details
+        if activation_details_to_insert:
+            self._insert_activation_details(activation_details_to_insert)
+        
+        # Maintain top-k constraint if requested
+        if maintain_top_k:
+            self._maintain_top_k()
+        
+        logger.info(f"Successfully merged {len(source_examples)} examples from source store")
+
+    def set_dataset_info(self, dataset_id: Optional[int] = None, dataset_name: Optional[str] = None, 
+                        overwrite_existing: bool = True) -> int:
+        """
+        Set dataset_id and dataset_name for all sequences in the store.
+        
+        Args:
+            dataset_id: Dataset ID to set (optional)
+            dataset_name: Dataset name to set (optional)
+            overwrite_existing: Whether to overwrite existing dataset info. If False, only updates
+                              sequences where both dataset_id and dataset_name are NULL.
+                              
+        Returns:
+            Number of sequences updated
+        """
+        if dataset_id is None and dataset_name is None:
+            logger.warning("No dataset_id or dataset_name provided, no updates made")
+            return 0
+        
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute("PRAGMA foreign_keys = ON")
+            
+            # Build the UPDATE query based on parameters
+            set_clauses = []
+            params = []
+            
+            if dataset_id is not None:
+                set_clauses.append("dataset_id = ?")
+                params.append(dataset_id)
+            
+            if dataset_name is not None:
+                set_clauses.append("dataset_name = ?")
+                params.append(dataset_name)
+            
+            query = f"UPDATE sequences SET {', '.join(set_clauses)}"
+            
+            if not overwrite_existing:
+                query += " WHERE dataset_id IS NULL AND dataset_name IS NULL"
+            
+            cursor.execute(query, params)
+            updated_count = cursor.rowcount
+            conn.commit()
+        
+        logger.info(f"Updated dataset info for {updated_count} sequences")
+        return updated_count
+
+    
+         

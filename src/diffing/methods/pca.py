@@ -35,6 +35,7 @@ from src.utils.dictionary.training import (
 )
 from src.utils.configs import get_model_configurations
 from src.utils.dashboards import AbstractOnlineDiffingDashboard
+from src.utils.max_act_store import MaxActStore
 
 class PCAMethod(DiffingMethod):
     """
@@ -228,6 +229,111 @@ class PCAMethod(DiffingMethod):
 
         logger.info(f"PCA fitting completed. Total samples: {total_samples}")
 
+        # Now collect maximum activating examples from each dataset separately
+        # This follows the normdiff approach more closely
+        logger.info("Computing maximum activating examples...")
+        
+        # Initialize maximum examples store
+        num_examples = self.method_cfg.analysis.max_activating_examples.num_examples
+        max_store = MaxActStore(
+            model_results_dir / "max_examples.db",
+            max_examples=num_examples,
+            tokenizer=self.tokenizer,
+            storage_format='dense'  # Store full per-token projections
+        )
+        
+        # Get dataset configurations  
+        from src.utils.configs import get_dataset_configurations
+        dataset_cfgs = get_dataset_configurations(
+            self.cfg,
+            use_chat_dataset=self.method_cfg.datasets.use_chat_dataset,
+            use_pretraining_dataset=self.method_cfg.datasets.use_pretraining_dataset,
+            use_training_dataset=self.method_cfg.datasets.use_training_dataset,
+        )
+        dataset_cfgs = [ds for ds in dataset_cfgs if ds.split == "validation"]
+
+        # Process each dataset to find maximum activating examples
+        for dataset_idx, dataset_cfg in enumerate(dataset_cfgs):
+            logger.info(f"Processing maximum examples for dataset: {dataset_cfg.id}")
+            
+            # Load the paired activation cache for this specific layer and dataset
+            from src.utils.activations import load_activation_dataset_from_config
+            from src.utils.cache import SampleCache
+            
+            paired_cache = load_activation_dataset_from_config(
+                cfg=self.cfg,
+                ds_cfg=dataset_cfg,
+                base_model_cfg=self.base_model_cfg,
+                finetuned_model_cfg=self.finetuned_model_cfg,
+                layer=layer_idx,
+                split="validation"
+            )
+            
+            # Create processed cache for the target
+            processed_cache = setup_sae_cache(target=target, paired_cache=paired_cache)
+            
+            # Create SampleCache to get sequences with tokens
+            sample_cache = SampleCache(paired_cache, bos_token_id=self.tokenizer.bos_token_id)
+            
+            # Process up to max_samples from this dataset for efficiency
+            max_samples_per_dataset = min(len(sample_cache), 10000)
+            
+            for sample_idx in range(max_samples_per_dataset):
+                tokens, activations = sample_cache[sample_idx]
+                
+                # Skip very short sequences
+                if len(tokens) <= 1:
+                    continue
+                
+                # Get processed activations for each token in sequence
+                processed_activations = []
+                for token_idx in range(len(tokens)):
+                    # Get the global index for this token
+                    if sample_cache.sample_start_indices is not None:
+                        global_idx = sample_cache.sample_start_indices[sample_idx] + token_idx
+                    else:
+                        # Fallback: use sequential indexing
+                        global_idx = sample_idx * 100 + token_idx  # Rough estimate
+                    processed_activation = processed_cache[global_idx]
+                    processed_activations.append(processed_activation)
+                
+                # Stack into sequence tensor [seq_len, activation_dim]
+                sequence_activations = torch.stack(processed_activations, dim=0)
+                
+                # Apply normalization if it was used during training
+                if normalize_mean is not None and normalize_std is not None:
+                    sequence_activations = (sequence_activations - normalize_mean.cpu()) / normalize_std.cpu()
+                
+                # Project onto PCA components
+                components = pca.components_.cpu()  # [n_components, activation_dim]
+                mean_pca = pca.mean_.cpu()
+                
+                # Center the data and project
+                centered_activations = sequence_activations - mean_pca  # [seq_len, activation_dim]
+                projections = torch.matmul(centered_activations, components.T)  # [seq_len, n_components]
+                
+                # Find the maximum absolute projection across all components and tokens
+                max_proj_per_token = torch.max(torch.abs(projections), dim=1)[0]  # [seq_len]
+                max_score = torch.max(max_proj_per_token).item()
+                
+                # Add to max store with dataset information
+                max_store.add_example(
+                    score=max_score,
+                    input_ids=tokens,
+                    scores_per_token=max_proj_per_token,  # Store per-token max projections
+                    additional_data={
+                        'layer': layer_idx,
+                        'target': target,
+                        'dataset_id': dataset_idx,
+                        'dataset_name': dataset_cfg.id
+                    },
+                    maintain_top_k=False  # We'll maintain at the end
+                )
+        
+        # Maintain top-k constraint after all additions
+        max_store._maintain_top_k()
+        logger.info(f"Stored {len(max_store)} maximum activating examples")
+
         # Save PCA model
         model_path = model_results_dir / "pca_model.pkl"
         with open(model_path, 'wb') as f:
@@ -252,7 +358,6 @@ class PCAMethod(DiffingMethod):
         # Compute explained variance ratio
         total_variance_explained = float(pca.explained_variance_ratio_.sum())
         logger.info(f"Total variance explained: {total_variance_explained:.4f}")
-
 
         # Collect training metrics
         training_metrics = {
@@ -457,6 +562,7 @@ class PCAMethod(DiffingMethod):
         multi_tab_interface(
             [
                 ("📊 Component Analysis", lambda: self._render_component_analysis_tab(selected_pca_info)),
+                ("🏆 Max Examples", lambda: self._render_max_examples_tab(selected_pca_info)),
                 ("🔥 Online Inference", lambda: PCAOnlineDashboard(self, selected_pca_info).display()),
                 ("🎨 Plots", lambda: self._render_plots_tab(selected_pca_info)),
             ],
@@ -592,6 +698,43 @@ class PCAMethod(DiffingMethod):
             component_norms = torch.norm(components, dim=1)
             st.markdown(f"**Mean Component Norm:** {float(component_norms.mean()):.4f}")
             st.markdown(f"**Component Norm Range:** [{float(component_norms.min()):.4f}, {float(component_norms.max()):.4f}]")
+
+    def _render_max_examples_tab(self, selected_pca_info):
+        """Render maximum activating examples tab using MaxActivationDashboardComponent."""
+        import streamlit as st
+        from src.utils.dashboards import MaxActivationDashboardComponent
+
+        target = selected_pca_info['target']
+        layer = selected_pca_info['layer']
+        model_results_dir = selected_pca_info['path']
+        
+        # Human-readable target name
+        target_display = self.target_display_names.get(target, target)
+        
+        st.markdown(f"**Selected PCA:** Layer {layer} - {target_display}")
+        
+        # Look for max examples database
+        max_store_path = model_results_dir / "max_examples.db"
+        
+        if not max_store_path.exists():
+            st.error(f"Maximum examples database not found: {max_store_path}")
+            st.info("Train the PCA model to generate maximum activating examples.")
+            return
+        
+        # Create MaxActStore instance
+        assert self.tokenizer is not None, "Tokenizer must be available for MaxActStore visualization"
+        max_store = MaxActStore(
+            max_store_path, 
+            tokenizer=self.tokenizer,
+            storage_format=None  # Read from existing config
+        )
+
+        # Create and display the dashboard component
+        component = MaxActivationDashboardComponent(
+            max_store, 
+            title=f"PCA Maximum Activating Examples - Layer {layer} - {target_display}"
+        )
+        component.display()
 
     def _render_plots_tab(self, selected_pca_info):
         """Render plots tab displaying explained variance plots."""

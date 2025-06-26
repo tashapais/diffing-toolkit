@@ -132,10 +132,12 @@ def build_push_sae_difference_latent_df(
         latent_df = {k: {} for k in range(sae.dict_size)}
 
     # Decoder norms
-    decoder_norms = sae.decoder.weight.norm(dim=-1)
+    decoder_norms = sae.decoder.weight.norm(dim=0) # [num_features]
+    assert decoder_norms.shape == (sae.dict_size,)
 
     # Encoder norms  
-    encoder_norms = sae.encoder.weight.norm(dim=1)
+    encoder_norms = sae.encoder.weight.norm(dim=1) # [num_features]
+    assert encoder_norms.shape == (sae.dict_size,)
 
     for f_idx, norm in enumerate(decoder_norms):
         latent_df[f_idx]["dec_norm"] = norm.item()
@@ -173,22 +175,45 @@ def make_plots(
         plot_rank_distributions(target_df, plots_dir)
     
     if "enc_norm" in df.columns:
-        plot_enc_norms(df, plots_dir)
+        plot_histogram(df, "enc_norm", plots_dir, title="Encoder Norm", xlabel="Norm", log_scale=True)
     
+    if "dec_norm" in df.columns:
+        plot_histogram(df, "dec_norm", plots_dir, title="Decoder Norm", xlabel="Norm", log_scale=True)
+    
+    if "max_act_validation" in df.columns:
+        plot_histogram(df, "max_act_validation", plots_dir, title="Max Activation Validation", xlabel="Max Activation Validation", log_scale=True)
+    
+    if "freq_validation" in df.columns:
+        plot_histogram(df, "freq_validation", plots_dir, title="Frequency Validation", xlabel="Frequency Validation", log_scale=True)
 
-def plot_enc_norms(df, plots_dir):
-    """Plot histogram of encoder norms"""
+def plot_histogram(df, column, plots_dir, title=None, xlabel=None, filename=None, log_scale=False):
+    """Plot histogram of a column from dataframe
+    
+    Args:
+        df: DataFrame containing the data
+        column: Column name to plot
+        plots_dir: Directory to save plots
+        title: Plot title (defaults to column name)
+        xlabel: X-axis label (defaults to column name)
+        filename: Output filename (defaults to column name)
+    """
+    if column not in df.columns:
+        logger.warning(f"Column '{column}' not found in dataframe")
+        return
+    
     plt.figure(figsize=(6, 4))
     plt.rcParams["text.usetex"] = True
     plt.rcParams.update({"font.size": 24})
     
-    plt.hist(df["enc_norm"], bins=100, alpha=0.7, color="blue")
-    plt.xlabel("Encoder Norm")
+    plt.hist(df[column], bins=100, alpha=0.7, color="blue")
+    plt.xlabel(xlabel or column.replace("_", " ").title())
     plt.ylabel("Count")
-    plt.title("Encoder Norms")
-    
+    plt.title(title or column.replace("_", " ").title())
+    if log_scale:
+        plt.yscale("log")
     plt.tight_layout()
-    plt.savefig(plots_dir / "enc_norms.pdf", bbox_inches="tight")
+    output_filename = filename or f"{column}.pdf"
+    plt.savefig(plots_dir / output_filename, bbox_inches="tight")
     plt.close()
 
 def plot_beta_ratios_template_perc(target_df, filtered_df, plots_dir):
@@ -440,7 +465,6 @@ def plot_error_vs_reconstruction(target_df, baseline_df, plots_dir, variant="sta
     )
     plt.close()
 
-
 def plot_ratio_histogram(target_df, baseline_df, plots_dir, ratio_type="error"):
     """Plot histogram of beta ratio values for error or reconstruction"""
     if f"beta_ratio_{ratio_type}" not in target_df.columns:
@@ -451,23 +475,31 @@ def plot_ratio_histogram(target_df, baseline_df, plots_dir, ratio_type="error"):
     ratio_col = f"beta_ratio_{ratio_type}"
 
     neg_mask = target_df[neg_filter_col] >= 0
-    baseline_neg_mask = baseline_df[neg_filter_col] >= 0
     ratio_values = target_df[ratio_col][neg_mask]
-    ratio_values_shared = baseline_df[ratio_col][baseline_neg_mask]
 
     # Filter out nans
     ratio_filtered = ratio_values[~np.isnan(ratio_values)]
-    ratio_shared_filtered = ratio_values_shared[~np.isnan(ratio_values_shared)]
 
-    # Compute combined range for consistent bins
-    all_data = np.concatenate([ratio_filtered, ratio_shared_filtered])
+    if baseline_df is not None:
+        baseline_neg_mask = baseline_df[neg_filter_col] >= 0
+        ratio_values_shared = baseline_df[ratio_col][baseline_neg_mask]
+        ratio_shared_filtered = ratio_values_shared[~np.isnan(ratio_values_shared)]
+        
+        # Compute combined range for consistent bins
+        all_data = np.concatenate([ratio_filtered, ratio_shared_filtered])
+    else:
+        # Use only target data for range
+        all_data = ratio_filtered
+
     min_val, max_val = np.min(all_data), np.max(all_data) if zoom is None else zoom
     bins = np.linspace(min_val, max_val, 100)
 
     plt.figure(figsize=(5, 3))
     plt.rcParams["text.usetex"] = True
     plt.hist(ratio_filtered, bins=bins, alpha=0.5, label="ft-only")
-    plt.hist(ratio_shared_filtered, bins=bins, alpha=0.5, label="Shared")
+    
+    if baseline_df is not None:
+        plt.hist(ratio_shared_filtered, bins=bins, alpha=0.5, label="Shared")
 
     label = "$\\nu^\\epsilon$" if ratio_type == "error" else "$\\nu^r$"
     plt.xlabel(label)
@@ -476,7 +508,8 @@ def plot_ratio_histogram(target_df, baseline_df, plots_dir, ratio_type="error"):
     plt.rcParams.update({"font.size": 16})
     plt.rcParams.update({"legend.fontsize": 16})
 
-    plt.legend()
+    if baseline_df is not None:
+        plt.legend()
     plt.tight_layout()
     plt.savefig(plots_dir / f"{ratio_type}_ratio.pdf", bbox_inches="tight")
     plt.close()

@@ -100,7 +100,6 @@ class SAEDifferenceMethod(DiffingMethod):
                 / f"layer_{layer_idx}"
                 / dictionary_name
             )
-            print(model_results_dir)
             model_results_dir.mkdir(parents=True, exist_ok=True)
             if (
                 not (model_results_dir / "dictionary_model" / "model.safetensors").exists()
@@ -175,7 +174,7 @@ class SAEDifferenceMethod(DiffingMethod):
 
                 make_plots(
                     dictionary_name=dictionary_name,
-                    plots_dir=model_results_dir,
+                    plots_dir=model_results_dir / "plots",
                 )
             logger.info(f"Successfully completed layer {layer_idx}")
 
@@ -192,6 +191,7 @@ class SAEDifferenceMethod(DiffingMethod):
         - Plots tab: Display all generated plots from the analysis pipeline
         """
         import streamlit as st
+        from src.utils.visualization import multi_tab_interface
         
         st.subheader("SAE Difference Analysis")
         
@@ -328,19 +328,6 @@ class SAEDifferenceMethod(DiffingMethod):
         else:
             st.info("Training metrics not found")
         
-        # # Create tab names for reference
-        # tab_names = ["📊 MaxAct Examples", "🔥 Online Inference", "🎯 Steering", "📈 Latent Statistics", "🎨 Plots"]
-        
-        # # Create tabs and handle selection
-        # tabs = st.tabs(tab_names)
-        
-        # # Monitor which tab is clicked by using session state
-        # # This is a workaround since Streamlit doesn't directly expose tab selection
-        # current_tab = 0  # Default to first tab
-        
-        # Check if user wants to switch to a specific tab (can be extended with buttons if needed)
-        # For now, we'll preserve the session state across reruns
-        from src.utils.visualization import multi_tab_interface
         multi_tab_interface(
             [
                 ("📊 MaxAct Examples", lambda: self._render_maxact_tab(selected_sae_info)),
@@ -352,32 +339,6 @@ class SAEDifferenceMethod(DiffingMethod):
             "SAE Difference Analysis",
         )
         
-        # # Render content for each tab
-        # with tabs[0]:  # MaxAct tab
-        #     if st.session_state.get('current_tab_content') != 'maxact':
-        #         st.session_state['current_tab_content'] = 'maxact'
-        #     self._render_maxact_tab(selected_sae_info)
-        
-        # with tabs[1]:  # Online Inference tab
-        #     if st.session_state.get('current_tab_content') != 'online':
-        #         st.session_state['current_tab_content'] = 'online'
-        #     SAEDifferenceOnlineDashboard(self, selected_sae_info).display()
-        
-        # with tabs[2]:  # Steering tab
-        #     if st.session_state.get('current_tab_content') != 'steering':
-        #         st.session_state['current_tab_content'] = 'steering'
-        #     SAESteeringDashboard(self, selected_sae_info).display()
-        
-        # with tabs[3]:  # Latent Statistics tab
-        #     if st.session_state.get('current_tab_content') != 'stats':
-        #         st.session_state['current_tab_content'] = 'stats'
-        #     self._render_latent_statistics_tab(selected_sae_info)
-        
-        # with tabs[4]:  # Plots tab
-        #     if st.session_state.get('current_tab_content') != 'plots':
-        #         st.session_state['current_tab_content'] = 'plots'
-        #     self._render_plots_tab(selected_sae_info)
-
     def _get_available_sae_directories(self):
         """Get list of available trained SAE directories."""
         sae_base_dir = self.results_dir / "sae_difference"
@@ -610,6 +571,7 @@ class SAEDifferenceMethod(DiffingMethod):
         """Render the Plots tab displaying all generated plots."""
         import streamlit as st
         from pathlib import Path
+        import base64
 
         selected_layer = selected_sae_info['layer']
         
@@ -685,8 +647,47 @@ class SAEDifferenceMethod(DiffingMethod):
                                     st.markdown(svg_content, unsafe_allow_html=True)
                                 except Exception as e:
                                     st.error(f"Error loading SVG {image_file.name}: {str(e)}")
+                            elif image_file.suffix.lower() == '.pdf':
+                                try:
+                                    # Display PDF inline using base64 encoding
+                                    with open(image_file, 'rb') as f:
+                                        pdf_data = f.read()
+                                    
+                                    # Encode PDF as base64 for embedding
+                                    pdf_base64 = base64.b64encode(pdf_data).decode('utf-8')
+                                    
+                                    # Create PDF viewer with download option
+                                    pdf_display = f"""
+                                    <iframe src="data:application/pdf;base64,{pdf_base64}" 
+                                            width="100%" height="400" type="application/pdf">
+                                        <p>PDF cannot be displayed. 
+                                           <a href="data:application/pdf;base64,{pdf_base64}" download="{image_file.name}">
+                                               Download {image_file.name}
+                                           </a>
+                                        </p>
+                                    </iframe>
+                                    """
+                                    st.markdown(pdf_display, unsafe_allow_html=True)
+                                    
+                                    # Also provide download button
+                                    st.download_button(
+                                        label=f"Download {image_file.name}",
+                                        data=pdf_data,
+                                        file_name=image_file.name,
+                                        mime="application/pdf"
+                                    )
+                                except Exception as e:
+                                    st.error(f"Error loading PDF {image_file.name}: {str(e)}")
+                                    # Fallback to download only
+                                    with open(image_file, 'rb') as f:
+                                        st.download_button(
+                                            label=f"Download {image_file.name}",
+                                            data=f.read(),
+                                            file_name=image_file.name,
+                                            mime="application/pdf"
+                                        )
                             else:
-                                # For PDF and other formats, provide download link
+                                # For other formats, provide download link
                                 st.markdown(f"📄 {image_file.name}")
                                 with open(image_file, 'rb') as f:
                                     st.download_button(

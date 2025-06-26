@@ -349,7 +349,7 @@ def compute_scalers_from_config(
             is_difference_sae=is_difference_sae,
             smaller_batch_size_for_error=True,
         )
-        effective_dir = results_dir / "closed_form_scalars" / "effective_ft_only_latent"
+        effective_dir = results_dir / "closed_form_scalars" / "effective_ft_only_latents"
         effective_dir.mkdir(parents=True, exist_ok=True)
         th.save(
             effective_ft_only_latents_indices,
@@ -373,7 +373,7 @@ def compute_scalers_from_config(
             base_error=base_error,
             smaller_batch_size_for_error=True,
         )
-        shared_dir = results_dir / "closed_form_scalars" / "shared_baseline_latent"
+        shared_dir = results_dir / "closed_form_scalars" / "shared_baseline_latents"
         shared_dir.mkdir(parents=True, exist_ok=True)
         th.save(
             shared_baseline_indices,

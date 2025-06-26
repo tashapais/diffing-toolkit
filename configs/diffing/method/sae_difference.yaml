@@ -19,7 +19,7 @@ training:
   local_shuffling: true
   local_shuffling_shard_size: 1_000_000
   workers: 16
-  overwrite: true
+  overwrite: false
   
 datasets:
   use_chat_dataset: true

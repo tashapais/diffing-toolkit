@@ -5,7 +5,7 @@ This module provides common functionality for converting diffing results
 into HTML visualizations using the tiny-dashboard library.
 """
 
-from typing import List, Tuple, Dict, Any, Optional, Callable
+from typing import List, Tuple, Dict, Any, Optional, Callable, Union
 import torch
 import streamlit as st
 from pathlib import Path
@@ -33,7 +33,7 @@ def convert_max_examples_to_dashboard_format(
 
     Args:
         max_examples: List of max activating examples from diffing results
-        tokenizer_name: Name/path of the tokenizer for caching
+        model_cfg: Model configuration containing tokenizer information
 
     Returns:
         List of tuples (max_activation_value, tokens, activation_values, text)
@@ -83,7 +83,7 @@ def create_html_highlight(
     act_tensor = torch.tensor(activations)
 
     if max_idx is None:
-        max_idx = torch.argmax(act_tensor).item()
+        max_idx = int(torch.argmax(act_tensor).item())
 
     # Apply windowing if not showing full sequence
     if not show_full:
@@ -104,13 +104,16 @@ def create_html_highlight(
 
 
 def filter_examples_by_search(
-    examples: List[Tuple[float, List[str], List[float], str]], search_term: str
-) -> List[Tuple[float, List[str], List[float], str]]:
+    examples: List[Union[Tuple[float, List[str], List[float], str], 
+                        Tuple[float, List[str], List[float], str, str]]], 
+    search_term: str
+) -> List[Union[Tuple[float, List[str], List[float], str], 
+                Tuple[float, List[str], List[float], str, str]]]:
     """
     Filter examples by search term.
 
     Args:
-        examples: List of (max_score, tokens, scores_per_token, text) tuples
+        examples: List of (max_score, tokens, scores_per_token, text[, dataset_name]) tuples
         search_term: Term to search for in the text
 
     Returns:
@@ -122,16 +125,39 @@ def filter_examples_by_search(
     search_term = search_term.lower().strip()
     filtered = []
 
-    for max_score, tokens, scores_per_token, text in examples:
+    for example in examples:
+        # Extract text (always 4th element regardless of tuple length)
+        text = example[3]
         if search_term in text.lower():
-            filtered.append((max_score, tokens, scores_per_token, text))
+            filtered.append(example)
 
     return filtered
 
 
+def create_dataset_name_html(dataset_name: str) -> str:
+    """
+    Create HTML for dataset name display in top right corner.
+    
+    Args:
+        dataset_name: Name of the dataset
+        
+    Returns:
+        HTML string for dataset name display
+    """
+    return f"""
+    <div style="position: absolute; top: 5px; right: 10px; 
+                background-color: #f0f0f0; padding: 2px 6px; 
+                border-radius: 3px; font-size: 0.8em; 
+                color: #666; border: 1px solid #ddd;">
+        {dataset_name}
+    </div>
+    """
+
+
 @st.cache_data
 def create_examples_html(
-    examples: List[Tuple[float, List[str], List[float], str]],
+    examples: List[Union[Tuple[float, List[str], List[float], str], 
+                        Tuple[float, List[str], List[float], str, str]]],
     _tokenizer: AutoTokenizer,
     title: str = "Max Activating Examples",
     max_examples: int = 30,
@@ -143,7 +169,7 @@ def create_examples_html(
     Create HTML for a list of max activating examples.
 
     Args:
-        examples: List of (max_score, tokens, scores_per_token, text) tuples
+        examples: List of (max_score, tokens, scores_per_token, text[, dataset_name]) tuples
         _tokenizer: HuggingFace tokenizer
         title: Title for the HTML page
         max_examples: Maximum number of examples to display
@@ -164,9 +190,14 @@ def create_examples_html(
     if use_absolute_max and examples:
         min_max_act = examples[0][0]  # First example has highest score
 
-    # Only use the first 3 elements for backward compatibility
-    for max_act, tokens, token_acts, text in examples[:max_examples]:
-        max_idx = torch.argmax(torch.tensor(token_acts)).item()
+    # Process examples, handling both 4-tuple and 5-tuple formats
+    for example in examples[:max_examples]:
+        # Extract common elements
+        max_act, tokens, token_acts, text = example[:4]
+        
+        # Extract dataset_name if present
+        dataset_name = example[4] if len(example) > 4 else None
+        max_idx = int(torch.argmax(torch.tensor(token_acts)).item())
 
         # Create both collapsed and full versions
         collapsed_html = create_html_highlight(
@@ -175,6 +206,13 @@ def create_examples_html(
         full_html = create_html_highlight(
             tokens, token_acts, _tokenizer, max_idx, min_max_act, window_size, True
         )
+
+        # Add dataset name to HTML if provided
+        if dataset_name:
+            dataset_html = create_dataset_name_html(dataset_name)
+            # Wrap the content with relative positioning to allow absolute positioning of dataset name
+            collapsed_html = f'<div style="position: relative;">{dataset_html}{collapsed_html}</div>'
+            full_html = f'<div style="position: relative;">{dataset_html}{full_html}</div>'
 
         content_parts.append(create_example_html(max_act, collapsed_html, full_html))
 

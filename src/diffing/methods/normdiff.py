@@ -355,7 +355,7 @@ class NormDiffDiffingMethod(DiffingMethod):
         self.compute_histogram(relative_diff_values, "Relative Activation Difference Norm", plot_dir)
         self.compute_histogram(relative_diff_values, "Relative Activation Difference Norm", plot_dir, no_outliers=True)
 
-    def process_layer(self, dataset_cfg: DatasetConfig, layer: int) -> Dict[str, Any]:
+    def process_layer(self, dataset_cfg: DatasetConfig, layer: int, max_act_store: MaxActStore) -> Dict[str, Any]:
         """
         Process a single layer for a dataset and compute norm differences.
         
@@ -371,19 +371,12 @@ class NormDiffDiffingMethod(DiffingMethod):
         # Load sample cache for this dataset and layer
         sample_cache, tokenizer = self.load_sample_cache(dataset_cfg, layer)
         
-        # Initialize maximum examples store
-        num_examples = self.method_cfg.analysis.max_activating_examples.num_examples
         # Use dataset and layer specific database path
         safe_name = dataset_cfg.id.split("/")[-1]
-        dataset_dir = self.results_dir / safe_name / f"layer_{layer}"
+        dataset_dir = self.results_dir / f"layer_{layer}" / safe_name 
         dataset_dir.mkdir(parents=True, exist_ok=True)
         plot_dir = dataset_dir / "plots"
         plot_dir.mkdir(parents=True, exist_ok=True)
-        max_store = MaxActStore(
-            dataset_dir / f"examples.db",
-            max_examples=num_examples,
-            tokenizer=tokenizer
-        )
 
         # Create dataset and dataloader
         dataset = SampleCacheDataset(sample_cache, self.method_cfg.method_params.max_samples)
@@ -420,11 +413,12 @@ class NormDiffDiffingMethod(DiffingMethod):
                 max_norm_value = torch.max(norm_diffs).item()
                 
                 # Add to maximum examples store
-                max_store.add_example(
+                max_act_store.add_example(
                     score=max_norm_value,
                     input_ids=tokens,
                     scores_per_token=norm_diffs,
-                    additional_data={'layer': layer}
+                    additional_data={'layer': layer},
+                    dataset_name=dataset_cfg.name,
                 )
                 
                 # Collect all norm values for statistics
@@ -456,7 +450,6 @@ class NormDiffDiffingMethod(DiffingMethod):
             'dataset_id': dataset_cfg.id,
             'layer': layer,
             'statistics': statistics,
-            'max_activating_examples': max_store.get_top_examples(),
             'total_tokens_processed': total_tokens,
             'total_samples_processed': processed_samples,
             'metadata': {
@@ -465,13 +458,13 @@ class NormDiffDiffingMethod(DiffingMethod):
             }
         }
     
-    def process_dataset(self, dataset_cfg: DatasetConfig) -> Dict[str, Any]:
+    def process_dataset(self, dataset_cfg: DatasetConfig, max_act_stores: Dict[int, MaxActStore]) -> Dict[str, Any]:
         """
         Process all layers for a single dataset.
         
         Args:
             dataset_cfg: Dataset configuration
-            
+            max_act_stores: Dictionary of MaxActStore instances for each layer
         Returns:
             Dictionary containing results for all layers of this dataset
         """
@@ -484,10 +477,11 @@ class NormDiffDiffingMethod(DiffingMethod):
                 "processed_layers": self.layers
             }
         }
-        
+
+
         # Process each layer
         for layer in self.layers:
-            layer_results = self.process_layer(dataset_cfg, layer)
+            layer_results = self.process_layer(dataset_cfg, layer, max_act_stores[layer])
             results['layers'][f'layer_{layer}'] = layer_results
             
         return results
@@ -501,7 +495,7 @@ class NormDiffDiffingMethod(DiffingMethod):
             results: Results dictionary
             
         Returns:
-            Path to saved file
+            Path to saved file  
         """
         # Convert dataset ID to safe filename
         safe_name = dataset_id.split("/")[-1]
@@ -531,12 +525,19 @@ class NormDiffDiffingMethod(DiffingMethod):
         Processes each dataset and layer combination, saves results to disk.
         """
         self.logger.info("Starting norm difference computation across datasets and layers...")
-        
+        max_act_stores = {}
+        for layer in self.layers:
+            max_act_stores[layer] = MaxActStore(
+                self.results_dir / f"layer_{layer}" / "examples.db",
+                tokenizer=self.tokenizer,
+                per_dataset=True,
+                max_examples=self.method_cfg.analysis.max_activating_examples.num_examples
+            )
         # Process each dataset
         for dataset_cfg in self.datasets:
             
             # Process all layers for this dataset
-            results = self.process_dataset(dataset_cfg)
+            results = self.process_dataset(dataset_cfg, max_act_stores)
             
             # Save results to disk
             output_file = self.save_results(dataset_cfg.id, results)
@@ -570,10 +571,10 @@ class NormDiffDiffingMethod(DiffingMethod):
         import streamlit as st
         from pathlib import Path
 
-        selected_layer = st.selectbox("Select Layer", self.layers)
+        selected_layer = st.selectbox("Select Layer", self.layers, key="layer_selector_plots_normdiff")
         
         # Find all dataset directories
-        dataset_dirs = [d for d in self.results_dir.iterdir() if d.is_dir()]
+        dataset_dirs = [d for d in (self.results_dir / f"layer_{selected_layer}").iterdir() if d.is_dir()]
         if not dataset_dirs:
             st.error(f"No datasets found in {self.results_dir}")
             return
@@ -585,7 +586,7 @@ class NormDiffDiffingMethod(DiffingMethod):
             dataset_name = dataset_dir.name
             
             # Find the plots directory for this dataset and layer
-            plots_dir = dataset_dir / f"layer_{selected_layer}" / "plots"
+            plots_dir = dataset_dir / "plots"
             
             if not plots_dir.exists():
                 continue  # Skip datasets without plots for this layer
@@ -687,59 +688,37 @@ class NormDiffDiffingMethod(DiffingMethod):
     def _render_dataset_statistics(self):
         """Render the dataset statistics tab using MaxActivationDashboardComponent."""
         from src.utils.dashboards import MaxActivationDashboardComponent
-
-        # Dataset selector
-        dataset_dirs = [d for d in self.results_dir.iterdir() if d.is_dir()]
-        if not dataset_dirs:
-            st.error(f"No norm difference results found in {self.results_dir}")
+        
+        # Find available layers
+        layer_dirs = list(self.results_dir.glob("layer_*"))
+        if not layer_dirs:
+            st.error(f"No layer directories found in {self.results_dir}")
             return
         
-        dataset_names = [d.name for d in dataset_dirs]
-        selected_dataset = st.selectbox("Select Dataset", dataset_names)
-        
-        if not selected_dataset:
-            return
-        
-        # Get dataset directory
-        dataset_dir = self.results_dir / selected_dataset
-        
-        if not dataset_dir.exists():
-            st.error(f"Dataset directory not found: {dataset_dir}")
-            return
-        
-        # Find available layers by scanning for database files
-        layer_files = list(dataset_dir.glob("layer_*_examples.db"))
-        if not layer_files:
-            st.error(f"No layer example databases found in {dataset_dir}")
-            return
-        
-        # Extract layer numbers from filenames
+        # Extract layer numbers from directory names and check for examples.db
         available_layers = []
-        for layer_file in layer_files:
-            # Extract layer number from filename like "layer_16_examples.db"
-            filename = layer_file.stem  # Remove .db extension
-            if filename.startswith("layer_") and filename.endswith("_examples"):
-                layer_part = filename[6:-9]  # Remove "layer_" prefix and "_examples" suffix
-                try:
-                    layer_num = int(layer_part)
-                    available_layers.append(layer_num)
-                except ValueError as ve:
-                    raise ValueError(f"Invalid layer number in filename: {filename} - extracted layer number: {layer_part} - {ve}")
+        for layer_dir in layer_dirs:
+            if not layer_dir.is_dir():
+                continue
+                
+            # Extract layer number from directory name like "layer_16"
+            dirname = layer_dir.name
+            layer_part = dirname[6:]  # Remove "layer_" prefix
+            layer_num = int(layer_part)
+            # Check if examples.db exists in this layer directory
+            examples_db_path = layer_dir / "examples.db"
+            if examples_db_path.exists():
+                available_layers.append(layer_num)
+
+        selected_layer = st.selectbox("Select Layer", available_layers, key="layer_selector_maxact_normdiff_dataset_statistics")
         
-        available_layers.sort()
-        
-        if not available_layers:
-            st.error("No valid layer databases found")
+        if not selected_layer:
             return
         
-        # Layer selector
-        selected_layer_num = st.selectbox("Select Layer", available_layers)
-        
-        if selected_layer_num is None:
-            return
-        
+        layer_dir = self.results_dir / f"layer_{selected_layer}"
+
         # Load the MaxActStore for this dataset and layer
-        max_store_path = dataset_dir / f"layer_{selected_layer_num}_examples.db"
+        max_store_path = layer_dir / "examples.db"
         
         if not max_store_path.exists():
             st.error(f"Example database not found: {max_store_path}")
@@ -750,13 +729,12 @@ class NormDiffDiffingMethod(DiffingMethod):
         max_store = MaxActStore(
             max_store_path, 
             tokenizer=self.tokenizer,
-            storage_format=None  # Read from existing config
         )
 
         # Create and display the dashboard component
         component = MaxActivationDashboardComponent(
             max_store, 
-            title=f"Norm Difference Examples - {selected_dataset} - Layer {selected_layer_num}"
+            title=f"Norm Difference Examples - Layer {selected_layer}"
         )
         component.display()
     
@@ -791,9 +769,9 @@ class NormDiffDiffingMethod(DiffingMethod):
                 # Check if normdiff results exist (any dataset dirs with results.json)
                 if normdiff_dir.exists():
                     has_results = False
-                    for dataset_dir in normdiff_dir.iterdir():
-                        if dataset_dir.is_dir():
-                            results_file = dataset_dir / "results.json"
+                    for layer_dir in normdiff_dir.iterdir():
+                        if layer_dir.is_dir():
+                            results_file = layer_dir / "examples.db"
                             if results_file.exists():
                                 has_results = True
                                 break

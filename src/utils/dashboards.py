@@ -823,6 +823,7 @@ class MaxActivationDashboardComponent:
     def __init__(self, max_store, title: str = "Maximum Activating Examples", 
                  initial_batch_size: int = 15, batch_size: int = 10):
         """
+        
         Args:
             max_store: MaxActStore instance
             title: Title for the dashboard
@@ -877,13 +878,15 @@ class MaxActivationDashboardComponent:
                 tokens = self.max_store.tokenizer.convert_ids_to_tokens(example["input_ids"])
                 # Use uniform scores for preview (all zeros)
                 scores_per_token = np.zeros(len(tokens))
-                
-                dashboard_examples.append((
+                example_tuple = [
                     example["max_score"],
                     tokens,
                     scores_per_token,
-                    example["text"]
-                ))
+                    example["text"],
+                ]
+                if "dataset_name" in example and example["dataset_name"] is not None:
+                    example_tuple.append(example["dataset_name"])
+                dashboard_examples.append(tuple(example_tuple))
             return dashboard_examples
         
         # Full mode: get detailed activation scores
@@ -918,12 +921,15 @@ class MaxActivationDashboardComponent:
                 tokens = self.max_store.tokenizer.convert_ids_to_tokens(example["input_ids"])
                 scores_per_token = np.zeros(len(tokens))
             
-            dashboard_examples.append((
+            example_tuple = [
                 example["max_score"],
                 tokens,
                 scores_per_token,
                 example["text"]
-            ))
+            ]
+            if "dataset_name" in example and example["dataset_name"] is not None:
+                example_tuple.append(example["dataset_name"])
+            dashboard_examples.append(tuple(example_tuple))
                     
         return dashboard_examples
 
@@ -931,7 +937,8 @@ class MaxActivationDashboardComponent:
                          selected_datasets: List[str], search_term: str) -> Dict[str, str]:
         """Generate session state keys based on current filters."""
         datasets_hash = hash(tuple(sorted(selected_datasets))) % 10000 if selected_datasets else 0
-        base_key = f"maxact_{selected_latent}_{selected_quantile}_{datasets_hash}_{hash(search_term) % 10000}"
+        db_path_hash = hash(str(self.max_store.db_path)) % 10000
+        base_key = f"maxact_{selected_latent}_{selected_quantile}_{datasets_hash}_{db_path_hash}_{hash(search_term) % 10000}"
         return {
             "examples": f"{base_key}_examples",
             "loaded_count": f"{base_key}_loaded_count", 
