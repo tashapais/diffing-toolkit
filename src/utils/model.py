@@ -4,12 +4,15 @@ from typing import Tuple
 import torch
 from loguru import logger
 from pathlib import Path
+import inspect
 
 from .configs import ModelConfig
 
 _MODEL_CACHE = {}
 _TOKENIZER_CACHE = {}
 
+def has_thinking(tokenizer: AutoTokenizer) -> bool:
+    return "enable_thinking" in inspect.signature(tokenizer.apply_chat_template).parameters
 
 def load_tokenizer(model_name: str) -> AutoTokenizer:
     if model_name in _TOKENIZER_CACHE:

@@ -23,7 +23,7 @@ from .diffing_method import DiffingMethod
 from src.utils.activations import get_layer_indices, load_activation_dataset_from_config, torch_quantile
 from src.utils.configs import get_dataset_configurations, DatasetConfig  
 from src.utils.cache import SampleCache
-from src.utils.max_act_store import MaxActStore
+from src.utils.max_act_store import MaxActStore, ReadOnlyMaxActStore
 from src.utils.dashboards import AbstractOnlineDiffingDashboard
 
 class SampleCacheDataset(Dataset):
@@ -726,7 +726,7 @@ class NormDiffDiffingMethod(DiffingMethod):
 
         # Create MaxActStore instance (read existing storage format from config)
         assert self.tokenizer is not None, "Tokenizer must be available for MaxActStore visualization"
-        max_store = MaxActStore(
+        max_store = ReadOnlyMaxActStore(
             max_store_path, 
             tokenizer=self.tokenizer,
         )

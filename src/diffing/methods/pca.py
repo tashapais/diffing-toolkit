@@ -21,21 +21,23 @@ from loguru import logger
 import json
 import pickle
 from collections import defaultdict
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Subset
 import streamlit as st
 from tqdm import tqdm, trange
+from torchdr import IncrementalPCA
 
 from .diffing_method import DiffingMethod
-from src.utils.activations import get_layer_indices
+from src.utils.activations import get_layer_indices, load_activation_dataset_from_config, load_activation_datasets_from_config
 from src.utils.dictionary.training import (
     setup_training_datasets,
     create_training_dataloader,
     setup_sae_cache,
     recompute_diff_normalizer,
 )
-from src.utils.configs import get_model_configurations
+from src.utils.configs import get_model_configurations, get_dataset_configurations
 from src.utils.dashboards import AbstractOnlineDiffingDashboard
 from src.utils.max_act_store import MaxActStore
+from src.utils.cache import SampleCache
 
 class PCAMethod(DiffingMethod):
     """
@@ -116,10 +118,11 @@ class PCAMethod(DiffingMethod):
                 not (model_results_dir / "pca_model.pkl").exists()
                 or self.method_cfg.training.overwrite
             ):
+                train_dataset, val_dataset, epoch_idx_per_step, normalize_mean, normalize_std = self._setup_dataset(layer_idx)
                 # Train PCA on differences for this layer
                 logger.info(f"Training PCA for layer {layer_idx} with target {target}")
                 training_metrics, model_path = self._train_pca_for_layer(
-                    layer_idx, target, model_results_dir
+                    train_dataset, layer_idx, target, model_results_dir,
                 )
                 
                 # Save training metrics
@@ -142,26 +145,9 @@ class PCAMethod(DiffingMethod):
 
         return {"status": "completed", "layers_processed": self.layers}
 
+    def _setup_dataset(self, layer_idx: int) -> Tuple[torch.Tensor, torch.Tensor, Dict[str, Any], torch.Tensor, torch.Tensor]:
+        """Setup training datasets with difference cache processing."""
 
-    def _train_pca_for_layer(
-        self, layer_idx: int, target: str, model_results_dir: Path
-    ) -> Tuple[Dict[str, Any], Path]:
-        """
-        Train IncrementalPCA on differences for a specific layer.
-        
-        Args:
-            layer_idx: Layer index to train on
-            target: Target direction (difference_ftb or difference_bft or base or ft)
-            model_results_dir: Directory to save results
-            
-        Returns:
-            Tuple of (training metrics, model path)
-        """
-        try:
-            from torchdr import IncrementalPCA
-        except ImportError:
-            raise ImportError("TorchDR is required for PCA analysis. Install with: pip install torchdr")
-        
         target = self.method_cfg.training.target
         assert target in [
             "difference_bft",
@@ -191,15 +177,38 @@ class PCAMethod(DiffingMethod):
         )
         
         # Unpack the result tuple
-        train_dataset, val_dataset, epoch_idx_per_step, normalize_mean, normalize_std = result  # type: ignore
+        return result
+    
+    def _train_pca_for_layer(
+        self, layer_idx: int, target: str, model_results_dir: Path
+    ) -> Tuple[Dict[str, Any], Path]:
+        """
+        Train IncrementalPCA on differences for a specific layer.
+        
+        Args:
+            layer_idx: Layer index to train on
+            target: Target direction (difference_ftb or difference_bft or base or ft)
+            model_results_dir: Directory to save results
+            
+        Returns:
+            Tuple of (training metrics, model path)
+        """
+        train_dataset, val_dataset, epoch_idx_per_step, normalize_mean, normalize_std = self._setup_dataset(layer_idx)
 
-        # Get activation dimension from first sample
+        # Get activation dimdatasetirst sample
         sample_activation = train_dataset[0]
         activation_dim = sample_activation.shape[-1]
         assert activation_dim > 0, f"Invalid activation dimension: {activation_dim}"
         logger.info(f"Activation dimension: {activation_dim}")
 
-        # Create data loader
+        # Check whether the PCA model already exists
+        if not self.method_cfg.training.overwrite and (model_results_dir / "pca_model.pkl").exists():
+            logger.info(f"Found existing PCA model at {model_results_dir / 'pca_model.pkl'}")
+            return
+        else:
+            logger.info(f"No existing PCA model found at {model_results_dir / 'pca_model.pkl'}, creating new one")
+
+        # Create data loaderdataset
         train_dataloader = create_training_dataloader(train_dataset, self.cfg, shuffle=False, drop_last=True)
 
         # Initialize IncrementalPCA
@@ -229,111 +238,6 @@ class PCAMethod(DiffingMethod):
 
         logger.info(f"PCA fitting completed. Total samples: {total_samples}")
 
-        # Now collect maximum activating examples from each dataset separately
-        # This follows the normdiff approach more closely
-        logger.info("Computing maximum activating examples...")
-        
-        # Initialize maximum examples store
-        num_examples = self.method_cfg.analysis.max_activating_examples.num_examples
-        max_store = MaxActStore(
-            model_results_dir / "max_examples.db",
-            max_examples=num_examples,
-            tokenizer=self.tokenizer,
-            storage_format='dense'  # Store full per-token projections
-        )
-        
-        # Get dataset configurations  
-        from src.utils.configs import get_dataset_configurations
-        dataset_cfgs = get_dataset_configurations(
-            self.cfg,
-            use_chat_dataset=self.method_cfg.datasets.use_chat_dataset,
-            use_pretraining_dataset=self.method_cfg.datasets.use_pretraining_dataset,
-            use_training_dataset=self.method_cfg.datasets.use_training_dataset,
-        )
-        dataset_cfgs = [ds for ds in dataset_cfgs if ds.split == "validation"]
-
-        # Process each dataset to find maximum activating examples
-        for dataset_idx, dataset_cfg in enumerate(dataset_cfgs):
-            logger.info(f"Processing maximum examples for dataset: {dataset_cfg.id}")
-            
-            # Load the paired activation cache for this specific layer and dataset
-            from src.utils.activations import load_activation_dataset_from_config
-            from src.utils.cache import SampleCache
-            
-            paired_cache = load_activation_dataset_from_config(
-                cfg=self.cfg,
-                ds_cfg=dataset_cfg,
-                base_model_cfg=self.base_model_cfg,
-                finetuned_model_cfg=self.finetuned_model_cfg,
-                layer=layer_idx,
-                split="validation"
-            )
-            
-            # Create processed cache for the target
-            processed_cache = setup_sae_cache(target=target, paired_cache=paired_cache)
-            
-            # Create SampleCache to get sequences with tokens
-            sample_cache = SampleCache(paired_cache, bos_token_id=self.tokenizer.bos_token_id)
-            
-            # Process up to max_samples from this dataset for efficiency
-            max_samples_per_dataset = min(len(sample_cache), 10000)
-            
-            for sample_idx in range(max_samples_per_dataset):
-                tokens, activations = sample_cache[sample_idx]
-                
-                # Skip very short sequences
-                if len(tokens) <= 1:
-                    continue
-                
-                # Get processed activations for each token in sequence
-                processed_activations = []
-                for token_idx in range(len(tokens)):
-                    # Get the global index for this token
-                    if sample_cache.sample_start_indices is not None:
-                        global_idx = sample_cache.sample_start_indices[sample_idx] + token_idx
-                    else:
-                        # Fallback: use sequential indexing
-                        global_idx = sample_idx * 100 + token_idx  # Rough estimate
-                    processed_activation = processed_cache[global_idx]
-                    processed_activations.append(processed_activation)
-                
-                # Stack into sequence tensor [seq_len, activation_dim]
-                sequence_activations = torch.stack(processed_activations, dim=0)
-                
-                # Apply normalization if it was used during training
-                if normalize_mean is not None and normalize_std is not None:
-                    sequence_activations = (sequence_activations - normalize_mean.cpu()) / normalize_std.cpu()
-                
-                # Project onto PCA components
-                components = pca.components_.cpu()  # [n_components, activation_dim]
-                mean_pca = pca.mean_.cpu()
-                
-                # Center the data and project
-                centered_activations = sequence_activations - mean_pca  # [seq_len, activation_dim]
-                projections = torch.matmul(centered_activations, components.T)  # [seq_len, n_components]
-                
-                # Find the maximum absolute projection across all components and tokens
-                max_proj_per_token = torch.max(torch.abs(projections), dim=1)[0]  # [seq_len]
-                max_score = torch.max(max_proj_per_token).item()
-                
-                # Add to max store with dataset information
-                max_store.add_example(
-                    score=max_score,
-                    input_ids=tokens,
-                    scores_per_token=max_proj_per_token,  # Store per-token max projections
-                    additional_data={
-                        'layer': layer_idx,
-                        'target': target,
-                        'dataset_id': dataset_idx,
-                        'dataset_name': dataset_cfg.id
-                    },
-                    maintain_top_k=False  # We'll maintain at the end
-                )
-        
-        # Maintain top-k constraint after all additions
-        max_store._maintain_top_k()
-        logger.info(f"Stored {len(max_store)} maximum activating examples")
-
         # Save PCA model
         model_path = model_results_dir / "pca_model.pkl"
         with open(model_path, 'wb') as f:
@@ -343,11 +247,11 @@ class PCAMethod(DiffingMethod):
                 'explained_variance_': pca.explained_variance_.cpu(),
                 'explained_variance_ratio_': pca.explained_variance_ratio_.cpu(),
                 'mean_': pca.mean_.cpu(),
+                'var_': pca.var_.cpu(),
+                'noise_variance_': pca.noise_variance_.cpu(),
                 'n_components': pca.n_components,
                 'n_samples_seen_': pca.n_samples_seen_,
                 'activation_dim': activation_dim,
-                'normalize_mean': normalize_mean.cpu() if normalize_mean is not None else None,
-                'normalize_std': normalize_std.cpu() if normalize_std is not None else None,
                 'target': target,
                 'config': OmegaConf.to_yaml(self.method_cfg),
             }
@@ -370,6 +274,126 @@ class PCAMethod(DiffingMethod):
         }
 
         return training_metrics, model_path
+    
+    @torch.no_grad()
+    def _collect_maximum_activating_examples(self, pca: IncrementalPCA, layer_idx: int, results_dir: Path, target: str) -> None:
+        """Collect maximum activating examples for a trained PCA model."""
+            
+        dataset_cfgs = get_dataset_configurations(
+            self.cfg,
+            use_chat_dataset=self.method_cfg.datasets.use_chat_dataset,
+            use_pretraining_dataset=self.method_cfg.datasets.use_pretraining_dataset,
+            use_training_dataset=self.method_cfg.datasets.use_training_dataset,
+        )
+
+        caches = load_activation_datasets_from_config(
+            cfg=self.cfg,
+            ds_cfgs=dataset_cfgs,
+            base_model_cfg=self.base_model_cfg,
+            finetuned_model_cfg=self.finetuned_model_cfg,
+            layers=[layer_idx],
+            split=self.method_cfg.analysis.max_activating_examples.split,
+        )  # Dict {dataset_name: {layer: PairedActivationCache, ...}}
+
+        # Now collect maximum activating examples from each dataset separately
+        logger.info(f"Computing maximum activating examples for layer {layer_idx} and target {target}...")
+        
+        # Check whether the max store already exists
+        pos_examples_path = results_dir / "positive_examples.db"
+        neg_examples_path = results_dir / "negative_examples.db"
+        if not self.method_cfg.analysis.max_activating_examples.overwrite and pos_examples_path.exists() and neg_examples_path.exists():
+            logger.info(f"Found existing max store at {results_dir}")
+            return
+        else:
+            pos_examples_path.unlink(missing_ok=True)
+            neg_examples_path.unlink(missing_ok=True)
+
+
+        
+  
+        # Initialize maximum examples store
+        num_examples = self.method_cfg.analysis.max_activating_examples.n_max_activations
+        max_store_positive = MaxActStore(
+            pos_examples_path,
+            max_examples=num_examples,
+            tokenizer=self.tokenizer,
+            storage_format='dense',  # Store full per-token projections,
+            per_dataset=True
+        )
+        max_store_negative = MaxActStore(
+            neg_examples_path,
+            max_examples=num_examples,
+            tokenizer=self.tokenizer,
+            storage_format='dense',  # Store full per-token projections
+            per_dataset=True
+        )
+
+        latent_idx = torch.arange(pca.n_components)
+        # Use async writers with context managers for efficient background writing
+        with max_store_positive.create_async_writer(
+            buffer_size=pca.n_components * 10,  # Buffer ~10 batches
+            flush_interval=30.0,
+            auto_maintain_top_k=True
+        ) as positive_writer, \
+        max_store_negative.create_async_writer(
+            buffer_size=pca.n_components * 10,
+            flush_interval=30.0,
+            auto_maintain_top_k=True
+        ) as negative_writer:
+            
+            # Process each dataset to find maximum activating examples
+            for dataset_idx, (dataset_name, dataset_caches) in enumerate(caches.items()):
+                logger.info(f"Processing maximum examples for dataset: {dataset_name}")
+                
+                paired_cache = dataset_caches[layer_idx]
+
+                # Create processed cache for the target
+                processed_cache = setup_sae_cache(target=self.method_cfg.training.target, paired_cache=paired_cache)
+                
+                # Create SampleCache to get sequences with tokens
+                sample_cache = SampleCache(processed_cache, bos_token_id=self.tokenizer.bos_token_id)
+
+                cache = Subset(sample_cache, indices=range(min(len(sample_cache), self.method_cfg.analysis.max_activating_examples.max_num_samples)))
+                dataloader = DataLoader(cache, batch_size=1, shuffle=False, num_workers=4, pin_memory=False)
+                
+                for batch_idx, batch in tqdm(enumerate(dataloader), total=len(dataloader), desc=f"Processing dataset {dataset_name}"):
+                    # Load sample
+                    tokens, activations = batch
+                    activations = activations[0].to(self.device)
+                    tokens = tokens[0]
+                    assert tokens.ndim == 1, f"Expected 1D tokens, got shape {tokens.shape}"
+                    
+                    # PCA transform
+                    projections = pca.transform(activations)  # [seq_len, n_components]
+                    assert projections.ndim == 2, f"Expected 2D projections, got shape {projections.shape}"
+                    assert projections.shape == (len(tokens), pca.n_components)
+
+                    # Compute max/min scores
+                    max_positive_score_per_component = torch.max(projections, dim=0)[0]
+                    max_negative_score_per_component = torch.min(projections, dim=0)[0]
+                    input_ids_batch = torch.tensor(tokens).repeat(pca.n_components, 1) # [n_components, seq_len]
+                    assert input_ids_batch.shape == (pca.n_components, len(tokens))
+
+                    projections_T = projections.T
+                    assert projections_T.shape == (pca.n_components, len(tokens))
+
+                    # Write to stores 
+                    # For future information: Writing is the bottleneck here. 
+                    positive_writer.add_batch_examples(
+                        scores_per_example=max_positive_score_per_component,
+                        input_ids_batch=input_ids_batch,
+                        scores_per_token_batch=projections_T,
+                        latent_idx=latent_idx,
+                        dataset_name=dataset_name,
+                    )
+
+                    negative_writer.add_batch_examples(
+                        scores_per_example=max_negative_score_per_component,
+                        input_ids_batch=input_ids_batch,
+                        scores_per_token_batch=projections_T,
+                        latent_idx=latent_idx,
+                        dataset_name=dataset_name,
+                    )
 
     def _run_analysis_for_layer(
         self, layer_idx: int, target: str, model_results_dir: Path
@@ -383,11 +407,11 @@ class PCAMethod(DiffingMethod):
         plots_dir.mkdir(exist_ok=True)
         
         # Load PCA model for analysis
-        pca_state = self._load_pca_model(model_results_dir / "pca_model.pkl")
+        pca = self._load_pca_model(model_results_dir / "pca_model.pkl")
         
         # Save explained variance analysis and create plots
-        if pca_state.get('explained_variance_ratio_') is not None:
-            explained_var_ratio = pca_state['explained_variance_ratio_']
+        if pca.explained_variance_ratio_ is not None:
+            explained_var_ratio = pca.explained_variance_ratio_
             cumulative_var = explained_var_ratio.cumsum(dim=0)
             variance_analysis = {
                 'explained_variance_ratio': explained_var_ratio.tolist(),
@@ -403,12 +427,42 @@ class PCAMethod(DiffingMethod):
                 explained_var_ratio, cumulative_var, plots_dir, layer_idx
             )
 
+        self._collect_maximum_activating_examples(pca, layer_idx, analysis_dir, target)
+
+        
+
         logger.info(f"Analysis completed for layer {layer_idx}")
+    
+    
+
 
     def _load_pca_model(self, model_path: Path) -> Dict[str, Any]:
         """Load PCA model state from disk."""
         with open(model_path, 'rb') as f:
-            return pickle.load(f)
+            pca_state = pickle.load(f)
+
+        pca = IncrementalPCA(
+            n_components=pca_state['n_components'],
+            batch_size=self.method_cfg.training.batch_size,
+            device=self.device,
+            verbose=True,
+        )
+        pca.components_ = pca_state['components_'].to(self.device)
+        pca.explained_variance_ = pca_state['explained_variance_'].to(self.device)
+        pca.explained_variance_ratio_ = pca_state['explained_variance_ratio_'].to(self.device)
+        pca.mean_ = pca_state['mean_'].to(self.device)
+        pca.n_samples_seen_ = pca_state['n_samples_seen_']
+        if 'var_' in pca_state:
+            pca.var_ = pca_state['var_'].to(self.device)
+        else:
+            logger.warning("No var_ in PCA state, setting to None")
+            pca.var_ = None
+        if 'noise_variance_' in pca_state:
+            pca.noise_variance_ = pca_state['noise_variance_']
+        else:
+            logger.warning("No noise_variance_ in PCA state, setting to None")
+            pca.noise_variance_ = None
+        return pca
 
     def _create_explained_variance_plot(
         self, 
@@ -621,16 +675,16 @@ class PCAMethod(DiffingMethod):
         
         # Load PCA model
         try:
-            pca_state = self._load_pca_model(model_results_dir / "pca_model.pkl")
+            pca = self._load_pca_model(model_results_dir / "pca_model.pkl")
         except Exception as e:
             st.error(f"Failed to load PCA model: {str(e)}")
             return
         
         # Display variance analysis
-        if pca_state.get('explained_variance_ratio_') is not None:
+        if pca.explained_variance_ratio_ is not None:
             st.markdown("### Explained Variance Analysis")
             
-            explained_var_ratio = pca_state['explained_variance_ratio_']
+            explained_var_ratio = pca.explained_variance_ratio_
             cumulative_var = explained_var_ratio.cumsum(dim=0)
             
             col1, col2, col3 = st.columns(3)
@@ -687,10 +741,10 @@ class PCAMethod(DiffingMethod):
             plt.close()
         
         # Display component statistics
-        if pca_state.get('components_') is not None:
+        if pca.components_ is not None:
             st.markdown("### Component Statistics")
             
-            components = pca_state['components_']  # Shape: [n_components, activation_dim]
+            components = pca.components_  # Shape: [n_components, activation_dim]
             
             st.markdown(f"**Component Matrix Shape:** {list(components.shape)}")
             
@@ -806,7 +860,7 @@ class PCAMethod(DiffingMethod):
 
     @torch.no_grad()
     def compute_pca_projections_for_tokens(
-        self, target: str, input_ids: torch.Tensor, attention_mask: torch.Tensor, layer: int
+        self, pca: IncrementalPCA, target: str, input_ids: torch.Tensor, attention_mask: torch.Tensor, layer: int
     ) -> Dict[str, Any]:
         """
         Compute PCA projections for given tokens (used by online dashboard).
@@ -865,18 +919,6 @@ class PCAMethod(DiffingMethod):
         batch_size, seq_len, hidden_dim = base_acts.shape
         assert finetuned_acts.shape == (batch_size, seq_len, hidden_dim), f"Shape mismatch: base {base_acts.shape} vs finetuned {finetuned_acts.shape}"
         
-        # Load PCA model based on target and layer
-        pca_model_path = None
-        for pca_info in self._get_available_pca_directories():
-            if pca_info['target'] == target and pca_info['layer'] == layer:
-                pca_model_path = pca_info['path'] / "pca_model.pkl"
-                break
-        
-        if pca_model_path is None or not pca_model_path.exists():
-            raise RuntimeError(f"PCA model not found for {target} layer {layer}")
-        
-        pca_state = self._load_pca_model(pca_model_path)
-        
         # Compute activation differences based on training target
         if target == "difference_bft":  # base - finetuned
             activation_diffs = finetuned_acts - base_acts
@@ -892,48 +934,19 @@ class PCAMethod(DiffingMethod):
         
         # Take first sequence for analysis
         diff_sequence = activation_diffs[0]  # [seq_len, hidden_dim]
-        
-        # Apply normalization if it was used during training
-        if pca_state.get('normalize_mean') is not None and pca_state.get('normalize_std') is not None:
-            normalize_mean = pca_state['normalize_mean']
-            normalize_std = pca_state['normalize_std']
-            if pca_state.get('target_rms') is not None:
-                diff_sequence = (diff_sequence - normalize_mean) / normalize_std * pca_state['target_rms']
-            else:
-                diff_sequence = (diff_sequence - normalize_mean) / normalize_std
-        
-        # Project onto PCA components
-        components = pca_state['components_']  # [n_components, activation_dim]
-        mean_pca = pca_state.get('mean_', torch.zeros(hidden_dim))
-        
-        # Center the data and project
-        centered_diffs = diff_sequence - mean_pca  # [seq_len, hidden_dim]
-        component_projections = torch.matmul(centered_diffs, components.T)  # [seq_len, n_components]
+
+        component_projections = pca.transform(diff_sequence)  # [seq_len, n_components]
         
         # Shape assertion for projections
-        n_components = components.shape[0]
+        n_components = pca.n_components
         assert component_projections.shape == (seq_len, n_components), f"Expected projection shape {(seq_len, n_components)}, got {component_projections.shape}"
         
         # Convert to numpy for visualization
         component_projections_np = component_projections.detach().numpy()
-        
-        # Compute per-token maximum component projection for visualization
-        max_projections_per_token = np.max(np.abs(component_projections_np), axis=1)  # [seq_len]
-        
-        # Compute statistics
-        statistics = {
-            'mean': float(np.mean(max_projections_per_token)),
-            'std': float(np.std(max_projections_per_token)),
-            'min': float(np.min(max_projections_per_token)),
-            'max': float(np.max(max_projections_per_token)),
-            'median': float(np.median(max_projections_per_token)),
-        }
-        
+            
         return {
             'tokens': tokens,
             'component_projections': component_projections_np,
-            'max_projections_per_token': max_projections_per_token,
-            'statistics': statistics,
             'total_tokens': len(tokens),
             'layer': layer,
             'n_components': n_components
@@ -986,16 +999,16 @@ class PCAOnlineDashboard(AbstractOnlineDiffingDashboard):
         super().__init__(method_instance)
         self.pca_info = pca_info
 
-        self._pca_state = None
+        self._pca = None
     
     def _render_streamlit_method_controls(self) -> Dict[str, Any]:
         """Render PCA-specific controls in Streamlit."""
         import streamlit as st
 
-        if self._pca_state is None:
+        if self._pca is None:
             pca_model_path = self.pca_info['path'] / "pca_model.pkl"
-            self._pca_state = self.method._load_pca_model(pca_model_path)
-        n_components = self._pca_state.get('n_components')
+            self._pca = self.method._load_pca_model(pca_model_path)
+        n_components = self._pca.n_components
         
         # Component selection
         selected_component = st.selectbox(
@@ -1016,7 +1029,7 @@ class PCAOnlineDashboard(AbstractOnlineDiffingDashboard):
         selected_component = kwargs.get('selected_component', 0)
         
         # Get full PCA projections from the parent method
-        results = self.method.compute_pca_projections_for_tokens(target, input_ids, attention_mask, layer)
+        results = self.method.compute_pca_projections_for_tokens(self._pca, target, input_ids, attention_mask, layer)
         
         # Extract values for the selected component only
         component_projections = results['component_projections']  # [seq_len, n_components]
@@ -1025,20 +1038,10 @@ class PCAOnlineDashboard(AbstractOnlineDiffingDashboard):
         values = component_projections[:, selected_component]  # [seq_len]
         analysis_title = f"PCA Component {selected_component} Projection"
         
-        # Compute statistics for the selected component
-        statistics = {
-            'mean': float(np.mean(values)),
-            'std': float(np.std(values)),
-            'min': float(np.min(values)),
-            'max': float(np.max(values)),
-            'median': float(np.median(values)),
-        }
-        
         # Return adapted results for the abstract dashboard
         return {
             'tokens': results['tokens'],
             'values': values,
-            'statistics': statistics,
             'total_tokens': results['total_tokens'],
             'analysis_title': analysis_title
         }

@@ -10,7 +10,7 @@ import json
 import numpy as np
 import torch
 from pathlib import Path
-from typing import Dict, List, Any, Optional, Tuple
+from typing import Dict, List, Any, Optional, Tuple, Union
 from tqdm import tqdm
 from loguru import logger
 import multiprocessing as mp
@@ -27,17 +27,90 @@ class WriteCommand(Enum):
     SHUTDOWN = "shutdown"
     FLUSH = "flush"
 
+def get_per_example_value(value, example_idx: int, batch_size: int) -> Optional[int]:
+    if value is None:
+        return None
+    elif isinstance(value, (int, float)):
+        return int(value)
+    elif isinstance(value, (np.ndarray, torch.Tensor)):
+        if isinstance(value, torch.Tensor):
+            value = value.cpu().numpy()
+        assert len(value) == batch_size, f"Array length {len(value)} doesn't match batch size {batch_size}"
+        return int(value[example_idx])
+    else:
+        raise TypeError(f"Unsupported type: {type(value)}")
 
 @dataclass
 class BatchData:
     """Data structure for batch examples to be written."""
     scores_per_example: np.ndarray
     input_ids_batch: List[List[int]]  # List of token lists (after attention mask applied)
-    scores_per_token_batch: Optional[List[np.ndarray]]
+    scores_per_token_batch: Optional[List[Optional[np.ndarray]]]
     additional_data_batch: Optional[List[dict]]
-    latent_idx: Optional[int]
-    quantile_idx: Optional[int]
+    latent_idx: Optional[Union[int, np.ndarray, torch.Tensor]]  # Single int or array of shape [batch_size]
+    quantile_idx: Optional[Union[int, np.ndarray, torch.Tensor]]  # Single int or array of shape [batch_size]
     dataset_name: Optional[str]
+    dataset_id: Optional[int]
+
+    def get_per_example_latent_idx(self, example_idx: int, batch_size: int) -> Optional[int]:
+        """
+        Get latent_idx for a specific example in the batch.
+        
+        Args:
+            example_idx: Index of the example in the batch
+            batch_size: Total batch size for validation
+            
+        Returns:
+            Latent index for the specific example, or None if not set
+        """
+        return get_per_example_value(self.latent_idx, example_idx, batch_size)
+    
+    def get_per_example_quantile_idx(self, example_idx: int, batch_size: int) -> Optional[int]:
+        """
+        Get quantile_idx for a specific example in the batch.
+        
+        Args:
+            example_idx: Index of the example in the batch
+            batch_size: Total batch size for validation
+            
+        Returns:
+            Quantile index for the specific example, or None if not set
+        """
+        return get_per_example_value(self.quantile_idx, example_idx, batch_size)
+    
+    def _get_per_example_value(self, value: Optional[Union[int, np.ndarray, torch.Tensor]], 
+                              example_idx: int, batch_size: int) -> Optional[int]:
+        """
+        Helper method to get per-example values from either scalar or array.
+        
+        This method supports both:
+        1. Single integer values that apply to the entire batch
+        2. Arrays/tensors of shape [batch_size] with different values per example
+        
+        Args:
+            value: The value to extract from (single int, array, or None)
+            example_idx: Index of the example in the batch
+            batch_size: Total batch size for validation
+            
+        Returns:
+            The value for the specific example
+        """
+        if value is None:
+            return None
+        elif isinstance(value, (int, float)):
+            # Single value applies to all examples in batch
+            return int(value)
+        elif isinstance(value, (np.ndarray, torch.Tensor)):
+            # Array of per-example values
+            if isinstance(value, torch.Tensor):
+                value = value.cpu().numpy()
+            
+            assert len(value) == batch_size, f"Array length {len(value)} doesn't match batch size {batch_size}"
+            assert 0 <= example_idx < batch_size, f"Example index {example_idx} out of bounds for batch size {batch_size}"
+            
+            return int(value[example_idx])
+        else:
+            raise TypeError(f"Unsupported type for latent/quantile index: {type(value)}. Expected int, np.ndarray, or torch.Tensor")
 
 
 @dataclass
@@ -150,9 +223,10 @@ class AsyncMaxActStoreWriter:
                           attention_mask_batch: Optional[torch.Tensor] = None,
                           scores_per_token_batch: Optional[torch.Tensor] = None,
                           additional_data_batch: Optional[List[dict]] = None,
-                          latent_idx: Optional[int] = None,
-                          quantile_idx: Optional[int] = None,
-                          dataset_name: Optional[str] = None) -> None:
+                          latent_idx: Optional[Union[int, torch.Tensor, np.ndarray]] = None,
+                          quantile_idx: Optional[Union[int, torch.Tensor, np.ndarray]] = None,
+                          dataset_name: Optional[str] = None,
+                          dataset_id: Optional[int] = None) -> None:
         """
         Add batch examples to buffer for background writing.
         
@@ -162,9 +236,10 @@ class AsyncMaxActStoreWriter:
             attention_mask_batch: Attention masks [batch_size, seq_len] (optional)
             scores_per_token_batch: Per-token scores [batch_size, seq_len] (optional)
             additional_data_batch: List of additional metadata dicts (optional)
-            latent_idx: Latent feature index (optional)
-            quantile_idx: Quantile index (optional)
+            latent_idx: Latent feature index (single int or array of shape [batch_size])
+            quantile_idx: Quantile index (single int or array of shape [batch_size])
             dataset_name: Dataset name (optional)
+            dataset_id: Dataset ID (optional)
         """
         if not self.is_running:
             raise RuntimeError("AsyncMaxActStoreWriter is not running. Call start() first.")
@@ -174,26 +249,33 @@ class AsyncMaxActStoreWriter:
         
         batch_size = scores_per_example.shape[0]
         
-        # Process each example in the batch and apply attention mask
-        processed_input_ids = []
-        processed_scores_per_token = []
-        
-        for i in range(batch_size):
-            input_ids = input_ids_batch[i]
+        # Efficiently process the batch based on whether attention mask is provided
+        if attention_mask_batch is None:
+            # No attention mask - process entire batch efficiently
+            processed_input_ids = input_ids_batch.cpu().tolist()
+            if scores_per_token_batch is not None:
+                # Convert entire batch to CPU once, then split into individual arrays
+                scores_cpu = scores_per_token_batch.cpu().numpy()
+                processed_scores_per_token = [scores_cpu[i] for i in range(batch_size)]
+            else:
+                processed_scores_per_token = [None] * batch_size
+        else:
+            # Attention mask provided - need to process each example individually
+            processed_input_ids = []
+            processed_scores_per_token = []
             
-            # Apply attention mask if provided
-            if attention_mask_batch is not None:
+            for i in range(batch_size):
+                input_ids = input_ids_batch[i]
                 valid_mask = attention_mask_batch[i].bool()
                 input_ids = input_ids[valid_mask]
-                scores_per_token = scores_per_token_batch[i][valid_mask] if scores_per_token_batch is not None else None
-            else:
-                scores_per_token = scores_per_token_batch[i] if scores_per_token_batch is not None else None
-            
-            processed_input_ids.append(input_ids.cpu().tolist())
-            if scores_per_token is not None:
-                processed_scores_per_token.append(scores_per_token.cpu().numpy())
-            else:
-                processed_scores_per_token.append(None)
+                
+                processed_input_ids.append(input_ids.cpu().tolist())
+                
+                if scores_per_token_batch is not None:
+                    scores_per_token = scores_per_token_batch[i][valid_mask]
+                    processed_scores_per_token.append(scores_per_token.cpu().numpy())
+                else:
+                    processed_scores_per_token.append(None)
         
         # Create batch data
         batch_data = BatchData(
@@ -203,7 +285,8 @@ class AsyncMaxActStoreWriter:
             additional_data_batch=additional_data_batch,
             latent_idx=latent_idx,
             quantile_idx=quantile_idx,
-            dataset_name=dataset_name
+            dataset_name=dataset_name,
+            dataset_id=dataset_id
         )
         
         with self._lock:
@@ -332,9 +415,13 @@ class MaxActStore:
         self._handle_config(max_examples, storage_format)
         self._init_database()
     
+    def _get_connection(self):
+        """Get a connection to the database."""
+        return sqlite3.connect(self.db_path)
+    
     def _init_database(self):
         """Initialize database schema."""
-        with sqlite3.connect(self.db_path) as conn:
+        with self._get_connection() as conn:
             cursor = conn.cursor()
             
             # Enable foreign key constraints
@@ -396,7 +483,7 @@ class MaxActStore:
     
     def _handle_config(self, max_examples: Optional[int], storage_format: Optional[str]):
         """Handle configuration storage and validation."""
-        with sqlite3.connect(self.db_path) as conn:
+        with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("PRAGMA foreign_keys = ON")
                    
@@ -445,7 +532,7 @@ class MaxActStore:
     
     def clear(self):
         """Clear all data from the database except config."""
-        with sqlite3.connect(self.db_path) as conn:
+        with self._get_connection() as conn:
             cursor = conn.cursor()
             # Enable foreign key constraints for this connection too
             cursor.execute("PRAGMA foreign_keys = ON")
@@ -457,10 +544,8 @@ class MaxActStore:
     
     def __len__(self) -> int:
         """Return the number of examples in the database."""
-        with sqlite3.connect(self.db_path) as conn:
+        with self._get_connection() as conn:
             cursor = conn.cursor()
-            # Enable foreign key constraints for this connection too
-            cursor.execute("PRAGMA foreign_keys = ON")
             cursor.execute("SELECT COUNT(*) FROM examples")
             return cursor.fetchone()[0]
     
@@ -475,7 +560,7 @@ class MaxActStore:
         if self.tokenizer is not None:
             text = self.tokenizer.decode(token_ids, skip_special_tokens=False)
         
-        with sqlite3.connect(self.db_path) as conn:
+        with self._get_connection() as conn:
             cursor = conn.cursor()
             # Enable foreign key constraints for this connection too
             cursor.execute("PRAGMA foreign_keys = ON")
@@ -487,7 +572,7 @@ class MaxActStore:
     
     def _insert_sequences_bulk(self, all_sequences: List, dataset_info: Optional[List[Tuple[int, str]]] = None) -> None:
         """Bulk insert sequences into the database."""
-        with sqlite3.connect(self.db_path) as conn:
+        with self._get_connection() as conn:
             cursor = conn.cursor()
             
             # Enable foreign key constraints for this connection too
@@ -549,7 +634,7 @@ class MaxActStore:
             metadata = json.dumps(additional_data) if additional_data else None
             bulk_data.append((sequence_idx, float(score), latent_idx, quantile_idx, metadata))
         
-        with sqlite3.connect(self.db_path) as conn:
+        with self._get_connection() as conn:
             cursor = conn.cursor()
             
             # Enable foreign key constraints for this connection too
@@ -570,7 +655,7 @@ class MaxActStore:
 
     def _insert_activation_details_dense(self, example_data: List[Tuple[int, np.ndarray]]):
         """Insert dense activation details for multiple examples."""
-        with sqlite3.connect(self.db_path) as conn:
+        with self._get_connection() as conn:
             cursor = conn.cursor()
             
             # Enable foreign key constraints for this connection too
@@ -591,7 +676,7 @@ class MaxActStore:
 
     def _insert_activation_details_sparse(self, example_data: List[Tuple[int, np.ndarray, np.ndarray]]):
         """Bulk insert sparse activation details for multiple examples."""
-        with sqlite3.connect(self.db_path) as conn:
+        with self._get_connection() as conn:
             cursor = conn.cursor()
             
             # Enable foreign key constraints for this connection too  
@@ -642,15 +727,20 @@ class MaxActStore:
             scores_per_token = torch.tensor(batch_data.scores_per_token_batch[i]) if batch_data.scores_per_token_batch and batch_data.scores_per_token_batch[i] is not None else None
             additional_data = batch_data.additional_data_batch[i] if batch_data.additional_data_batch else None
             
+            # Get per-example latent_idx and quantile_idx
+            latent_idx = batch_data.get_per_example_latent_idx(i, batch_size)
+            quantile_idx = batch_data.get_per_example_quantile_idx(i, batch_size)
+            
             # Generate a unique sequence index
             sequence_idx = hash(tuple(input_ids.tolist())) % (2**31)
             
             # Insert sequence with dataset info
             self._insert_sequence(sequence_idx, input_ids, 
-                                dataset_name=batch_data.dataset_name)
+                                dataset_name=batch_data.dataset_name,
+                                dataset_id=batch_data.dataset_id)
             
             # Insert example
-            example_ids = self._insert_example([(score, sequence_idx, batch_data.latent_idx, batch_data.quantile_idx, additional_data)])
+            example_ids = self._insert_example([(score, sequence_idx, latent_idx, quantile_idx, additional_data)])
             
             # Insert activation details if provided
             if scores_per_token is not None:
@@ -662,25 +752,121 @@ class MaxActStore:
                     values = scores_per_token.numpy().astype(np.float32)
                     self._insert_activation_details([(example_ids[0], values)])
 
+    def _get_grouping_key(self, latent_idx: Optional[int], quantile_idx: Optional[int], 
+                         dataset_name: Optional[str]) -> Optional[tuple]:
+        """
+        Get the grouping key for top-k management based on active dimensions.
+        
+        Args:
+            latent_idx: Latent feature index (optional)
+            quantile_idx: Quantile index (optional) 
+            dataset_name: Dataset name (optional)
+            
+        Returns:
+            Tuple representing the grouping key, or None for overall grouping
+        """
+        key = []
+        if latent_idx is not None:
+            key.append(('latent_idx', latent_idx))
+        if quantile_idx is not None:
+            key.append(('quantile_idx', quantile_idx))
+        if self.per_dataset:
+            # Always include dataset_name in key when per_dataset=True, even if None
+            key.append(('dataset_name', dataset_name))
+        return tuple(key) if key else None  # None means overall grouping
+
     def _maintain_top_k(self):
-        """Remove examples beyond max_examples limit, keeping highest scores."""
+        """Remove examples beyond max_examples limit, keeping highest scores per group."""
         if self.max_examples is None:
             return
         
-        with sqlite3.connect(self.db_path) as conn:
+        with self._get_connection() as conn:
             cursor = conn.cursor()
-            
-            # Enable foreign key constraints for this connection too
             cursor.execute("PRAGMA foreign_keys = ON")
             
-            if self.per_dataset:
-                # Maintain top-k per dataset
-                self._maintain_top_k_per_dataset(cursor)
-            else:
-                # Maintain top-k overall
-                self._maintain_top_k_overall(cursor)
+            # Get all unique grouping combinations that exist in the database
+            groups = self._get_existing_groups(cursor)
+            
+            for group_key in groups:
+                self._maintain_top_k_for_group(cursor, group_key)
             
             conn.commit()
+
+    def _get_existing_groups(self, cursor) -> List[Optional[tuple]]:
+        """Get all existing grouping combinations in the database."""
+        cursor.execute("""
+            SELECT DISTINCT e.latent_idx, e.quantile_idx, s.dataset_name
+            FROM examples e
+            JOIN sequences s ON e.sequence_idx = s.sequence_idx
+        """)
+        
+        raw_groups = cursor.fetchall()
+        groups = set()
+        
+        for latent_idx, quantile_idx, dataset_name in raw_groups:
+            group_key = self._get_grouping_key(latent_idx, quantile_idx, dataset_name)
+            groups.add(group_key)
+        
+        return list(groups)
+
+    def _maintain_top_k_for_group(self, cursor, group_key: Optional[tuple]):
+        """Maintain top-k for a specific grouping."""
+        # Build WHERE clause based on group_key
+        where_conditions = []
+        params = []
+        
+        if group_key:
+            for dim_name, dim_value in group_key:
+                if dim_name == 'latent_idx':
+                    if dim_value is None:
+                        where_conditions.append("e.latent_idx IS NULL")
+                    else:
+                        where_conditions.append("e.latent_idx = ?")
+                        params.append(dim_value)
+                elif dim_name == 'quantile_idx':
+                    if dim_value is None:
+                        where_conditions.append("e.quantile_idx IS NULL")
+                    else:
+                        where_conditions.append("e.quantile_idx = ?")
+                        params.append(dim_value)
+                elif dim_name == 'dataset_name':
+                    if dim_value is None:
+                        where_conditions.append("s.dataset_name IS NULL")
+                    else:
+                        where_conditions.append("s.dataset_name = ?")
+                        params.append(dim_value)
+        else:
+            # Handle the None group case - examples with no latent_idx, quantile_idx, and (if per_dataset=False) no dataset constraints
+            if self.per_dataset:
+                # When per_dataset=True, None group means latent_idx=None, quantile_idx=None, dataset_name=None
+                where_conditions = ["e.latent_idx IS NULL", "e.quantile_idx IS NULL", "s.dataset_name IS NULL"]
+            else:
+                # When per_dataset=False, None group means latent_idx=None, quantile_idx=None (dataset_name irrelevant)
+                where_conditions = ["e.latent_idx IS NULL", "e.quantile_idx IS NULL"]
+        
+        where_clause = " AND ".join(where_conditions)
+        
+        # Get count for this group
+        cursor.execute(f"""
+            SELECT COUNT(*) FROM examples e
+            JOIN sequences s ON e.sequence_idx = s.sequence_idx
+            WHERE {where_clause}
+        """, params)
+        
+        current_count = cursor.fetchone()[0]
+        
+        if current_count > self.max_examples:
+            # Get example IDs to delete (lowest scores in this group)
+            cursor.execute(f"""
+                SELECT e.example_id FROM examples e
+                JOIN sequences s ON e.sequence_idx = s.sequence_idx
+                WHERE {where_clause}
+                ORDER BY e.score ASC 
+                LIMIT ?
+            """, params + [current_count - self.max_examples])
+            
+            ids_to_delete = [row[0] for row in cursor.fetchall()]
+            self._delete_examples_by_ids(cursor, ids_to_delete)
     
     def _maintain_top_k_overall(self, cursor):
         """Remove examples beyond max_examples limit overall, keeping highest scores."""
@@ -803,8 +989,9 @@ class MaxActStore:
                           attention_mask_batch: Optional[torch.Tensor] = None,
                           scores_per_token_batch: Optional[torch.Tensor] = None,
                           additional_data_batch: Optional[List[dict]] = None,
-                          latent_idx: Optional[int] = None,
-                          quantile_idx: Optional[int] = None) -> None:
+                          latent_idx: Optional[Union[int, torch.Tensor, np.ndarray]] = None,
+                          quantile_idx: Optional[Union[int, torch.Tensor, np.ndarray]] = None,
+                          dataset_name: Optional[str] = None) -> None:
         """
         Add multiple examples from a batch with top-k management (synchronous version).
         
@@ -835,14 +1022,18 @@ class MaxActStore:
                 scores_per_token = scores_per_token_batch[i] if scores_per_token_batch is not None else None
             
             additional_data = additional_data_batch[i] if additional_data_batch is not None else None
+    
+            
+            per_example_latent_idx = get_per_example_value(latent_idx, i, batch_size)
+            per_example_quantile_idx = get_per_example_value(quantile_idx, i, batch_size)
             
             # Add this example
             self.add_example(
                 score=score,
                 input_ids=input_ids,
                 scores_per_token=scores_per_token,
-                latent_idx=latent_idx,
-                quantile_idx=quantile_idx,
+                latent_idx=per_example_latent_idx,
+                quantile_idx=per_example_quantile_idx,
                 additional_data=additional_data,
                 maintain_top_k=False
             )
@@ -957,11 +1148,8 @@ class MaxActStore:
         Returns:
             List of example dictionaries
         """
-        with sqlite3.connect(self.db_path) as conn:
+        with self._get_connection() as conn:
             cursor = conn.cursor()
-            
-            # Enable foreign key constraints for this connection too
-            cursor.execute("PRAGMA foreign_keys = ON")
             
             # Build query with optional filters
             query = """
@@ -1032,7 +1220,6 @@ class MaxActStore:
         """Get list of available dataset names."""
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
-            cursor.execute("PRAGMA foreign_keys = ON")
             cursor.execute("SELECT DISTINCT dataset_name FROM sequences WHERE dataset_name IS NOT NULL ORDER BY dataset_name")
             rows = cursor.fetchall()
             return [row[0] for row in rows]
@@ -1069,9 +1256,6 @@ class MaxActStore:
             
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
-            
-            # Enable foreign key constraints for this connection too
-            cursor.execute("PRAGMA foreign_keys = ON")
             
             # Build query with IN clause for batch retrieval
             placeholders = ",".join("?" * len(example_ids))
@@ -1376,5 +1560,232 @@ class MaxActStore:
         logger.info(f"Updated dataset info for {updated_count} sequences")
         return updated_count
 
+    def get_available_latents(self) -> List[int]:
+        """Get list of available latent indices from the database."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT DISTINCT latent_idx FROM examples WHERE latent_idx IS NOT NULL ORDER BY latent_idx")
+            return [row[0] for row in cursor.fetchall()]
+
+    def get_available_quantiles(self) -> List[int]:
+        """Get list of available quantile indices from the database."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT DISTINCT quantile_idx FROM examples WHERE quantile_idx IS NOT NULL ORDER BY quantile_idx")
+            return [row[0] for row in cursor.fetchall()]
+
+    def get_lowest_score_for_group(self, latent_idx: Optional[int] = None,
+                                   quantile_idx: Optional[int] = None, 
+                                   dataset_name: Optional[str] = None) -> Optional[float]:
+        """Get the lowest score for a specific grouping."""
+        group_key = self._get_grouping_key(latent_idx, quantile_idx, dataset_name)
+        
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            
+            where_conditions = []
+            params = []
+            
+            if group_key:
+                for dim_name, dim_value in group_key:
+                    if dim_name == 'latent_idx':
+                        if dim_value is None:
+                            where_conditions.append("e.latent_idx IS NULL")
+                        else:
+                            where_conditions.append("e.latent_idx = ?")
+                            params.append(dim_value)
+                    elif dim_name == 'quantile_idx':
+                        if dim_value is None:
+                            where_conditions.append("e.quantile_idx IS NULL")
+                        else:
+                            where_conditions.append("e.quantile_idx = ?") 
+                            params.append(dim_value)
+                    elif dim_name == 'dataset_name':
+                        if dim_value is None:
+                            where_conditions.append("s.dataset_name IS NULL")
+                        else:
+                            where_conditions.append("s.dataset_name = ?")
+                            params.append(dim_value)
+            
+            where_clause = " AND ".join(where_conditions) if where_conditions else "1=1"
+            
+            cursor.execute(f"""
+                SELECT MIN(e.score) FROM examples e
+                JOIN sequences s ON e.sequence_idx = s.sequence_idx  
+                WHERE {where_clause}
+            """, params)
+            
+            result = cursor.fetchone()
+            return result[0] if result and result[0] is not None else None
+
+    def get_group_capacity_info(self) -> Dict[tuple, Dict[str, Any]]:
+        """Get capacity info for all existing groups."""
+        groups = {}
+        
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            
+            # Get all existing combinations
+            cursor.execute("""
+                SELECT e.latent_idx, e.quantile_idx, s.dataset_name, 
+                       COUNT(*) as count, MIN(e.score) as min_score
+                FROM examples e
+                JOIN sequences s ON e.sequence_idx = s.sequence_idx
+                GROUP BY e.latent_idx, e.quantile_idx, s.dataset_name
+            """)
+            
+            for latent_idx, quantile_idx, dataset_name, count, min_score in cursor.fetchall():
+                group_key = self._get_grouping_key(latent_idx, quantile_idx, dataset_name)
+                groups[group_key] = {
+                    'count': count,
+                    'min_score': min_score,
+                    'is_full': count >= self.max_examples if self.max_examples else False
+                }
+        
+        return groups
+
+class ReadOnlyMaxActStore(MaxActStore):
+    """
+    Read-only version of MaxActStore optimized for concurrent access.
     
+    This class inherits all read methods from MaxActStore but:
+    1. Opens database in read-only mode to prevent locking issues
+    2. Uses WAL mode for better concurrent read access
+    3. Disables foreign key constraints for read operations
+    4. Blocks all write operations with helpful error messages
+    
+    Perfect for dashboard/browser applications where multiple users
+    need concurrent read access without "Database is locked" errors.
+    """
+    
+    def __init__(self, db_path: Path, tokenizer=None):
+        """
+        Initialize read-only store.
+        
+        Args:
+            db_path: Path to existing SQLite database file
+            tokenizer: Optional tokenizer for text decoding
+        """
+        self.db_path = Path(db_path)
+        self.tokenizer = tokenizer
+        
+        # Validate database exists
+        if not self.db_path.exists():
+            raise FileNotFoundError(f"Database not found: {self.db_path}")
+        
+        # Enable WAL mode for better concurrent access (if not already enabled)
+        self._setup_wal_mode()
+        
+        # Load config from existing database
+        self._load_readonly_config()
+        
+        logger.info(f"Initialized ReadOnlyMaxActStore for {self.db_path}")
+    
+    def _setup_wal_mode(self):
+        """Enable WAL mode for better concurrent read access."""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute("PRAGMA journal_mode=WAL")
+                mode = cursor.fetchone()[0]
+                if mode.upper() == 'WAL':
+                    logger.debug("WAL mode enabled for better concurrency")
+                else:
+                    logger.warning(f"Could not enable WAL mode, got: {mode}")
+        except Exception as e:
+            logger.warning(f"Failed to set WAL mode: {e}")
+    
+    def _load_readonly_config(self):
+        """Load configuration from existing database."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            
+            # Load existing config
+            cursor.execute("SELECT key, value FROM config")
+            config = dict(cursor.fetchall())
+            
+            if 'storage_format' not in config:
+                raise ValueError("No storage_format found in database config")
+            
+            self._storage_format = config['storage_format']
+            self.max_examples = int(config['max_examples']) if 'max_examples' in config else None
+            self.per_dataset = False  # This info isn't stored in config, assume False for read-only
+    
+    def _get_readonly_connection(self):
+        """Get a read-only database connection."""
+        # Use URI format with read-only mode for better concurrent access
+        readonly_path = f"file:{self.db_path}?mode=ro"
+        conn = sqlite3.connect(readonly_path, uri=True)
+        
+        # Don't enable foreign key constraints for read-only operations
+        # This reduces lock contention
+        return conn
+    
+
+    # Override all write methods to prevent accidents
+    def add_example(self, *args, **kwargs):
+        """Not supported in read-only mode."""
+        raise NotImplementedError(
+            "ReadOnlyMaxActStore doesn't support add_example(). "
+            "Use the regular MaxActStore for writing operations."
+        )
+    
+    def add_batch_examples(self, *args, **kwargs):
+        """Not supported in read-only mode.""" 
+        raise NotImplementedError(
+            "ReadOnlyMaxActStore doesn't support add_batch_examples(). "
+            "Use the regular MaxActStore for writing operations."
+        )
+    
+    def clear(self):
+        """Not supported in read-only mode."""
+        raise NotImplementedError(
+            "ReadOnlyMaxActStore doesn't support clear(). "
+            "Use the regular MaxActStore for writing operations."
+        )
+    
+    def fill(self, *args, **kwargs):
+        """Not supported in read-only mode."""
+        raise NotImplementedError(
+            "ReadOnlyMaxActStore doesn't support fill(). "
+            "Use the regular MaxActStore for writing operations."
+        )
+    
+    def merge(self, *args, **kwargs):
+        """Not supported in read-only mode."""
+        raise NotImplementedError(
+            "ReadOnlyMaxActStore doesn't support merge(). "
+            "Use the regular MaxActStore for writing operations."
+        )
+    
+    def set_dataset_info(self, *args, **kwargs):
+        """Not supported in read-only mode."""
+        raise NotImplementedError(
+            "ReadOnlyMaxActStore doesn't support set_dataset_info(). "
+            "Use the regular MaxActStore for writing operations."
+        )
+    
+    def create_async_writer(self, *args, **kwargs):
+        """Not supported in read-only mode."""
+        raise NotImplementedError(
+            "ReadOnlyMaxActStore doesn't support create_async_writer(). "
+            "Use the regular MaxActStore for writing operations."
+        )
+    
+    # Override private write methods
+    def _insert_sequence(self, *args, **kwargs):
+        """Not supported in read-only mode."""
+        raise NotImplementedError("Read-only store doesn't support _insert_sequence")
+    
+    def _insert_example(self, *args, **kwargs):
+        """Not supported in read-only mode."""
+        raise NotImplementedError("Read-only store doesn't support _insert_example")
+    
+    def _insert_activation_details(self, *args, **kwargs):
+        """Not supported in read-only mode."""
+        raise NotImplementedError("Read-only store doesn't support _insert_activation_details")
+    
+    def _maintain_top_k(self, *args, **kwargs):
+        """Not supported in read-only mode."""
+        raise NotImplementedError("Read-only store doesn't support _maintain_top_k")
          

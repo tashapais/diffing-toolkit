@@ -1356,3 +1356,319 @@ class TestMaxActStore:
         assert len(store) == 5
         examples = store.get_top_examples()
         assert all(ex["dataset_name"] == "shutdown_test" for ex in examples) 
+
+
+    def test_per_latent_top_k_management(self, temp_db_path, storage_format):
+        """Test that top-k is maintained per latent_idx."""
+        store = MaxActStore(temp_db_path, max_examples=2, storage_format=storage_format)
+        
+        # Add examples for latent 0 (should keep top 2)
+        for i, score in enumerate([0.9, 0.8, 0.7]):  # Should keep 0.9, 0.8
+            store.add_example(
+                score=score,
+                input_ids=torch.tensor([i, i+1, i+2]),
+                latent_idx=0,
+                maintain_top_k=False
+            )
+        
+        # Add examples for latent 1 (should keep top 2)  
+        for i, score in enumerate([0.95, 0.75, 0.65]):  # Should keep 0.95, 0.75
+            store.add_example(
+                score=score,
+                input_ids=torch.tensor([i+10, i+11, i+12]),
+                latent_idx=1,
+                maintain_top_k=False
+            )
+        
+        # Force top-k maintenance
+        store._maintain_top_k()
+        
+        # Should have 4 total examples (2 per latent)
+        assert len(store) == 4
+        
+        # Check latent 0 examples
+        latent_0_examples = store.get_top_examples(latent_idx=0)
+        assert len(latent_0_examples) == 2
+        latent_0_scores = [ex["max_score"] for ex in latent_0_examples]
+        assert sorted(latent_0_scores, reverse=True) == [0.9, 0.8]
+        
+        # Check latent 1 examples
+        latent_1_examples = store.get_top_examples(latent_idx=1)
+        assert len(latent_1_examples) == 2
+        latent_1_scores = [ex["max_score"] for ex in latent_1_examples]
+        assert sorted(latent_1_scores, reverse=True) == [0.95, 0.75]
+
+    def test_per_quantile_top_k_management(self, temp_db_path, storage_format):
+        """Test that top-k is maintained per quantile_idx."""
+        store = MaxActStore(temp_db_path, max_examples=2, storage_format=storage_format)
+        
+        # Add examples for quantile 0
+        for i, score in enumerate([0.9, 0.8, 0.7]):
+            store.add_example(
+                score=score,
+                input_ids=torch.tensor([i, i+1, i+2]),
+                quantile_idx=0,
+                maintain_top_k=False
+            )
+        
+        # Add examples for quantile 1
+        for i, score in enumerate([0.95, 0.75, 0.65]):
+            store.add_example(
+                score=score,
+                input_ids=torch.tensor([i+10, i+11, i+12]),
+                quantile_idx=1,
+                maintain_top_k=False
+            )
+        
+        store._maintain_top_k()
+        
+        assert len(store) == 4  # 2 per quantile
+        
+        # Check quantile 0 examples
+        quantile_0_examples = store.get_top_examples(quantile_idx=0)
+        assert len(quantile_0_examples) == 2
+        quantile_0_scores = [ex["max_score"] for ex in quantile_0_examples]
+        assert sorted(quantile_0_scores, reverse=True) == [0.9, 0.8]
+        
+        # Check quantile 1 examples
+        quantile_1_examples = store.get_top_examples(quantile_idx=1)
+        assert len(quantile_1_examples) == 2
+        quantile_1_scores = [ex["max_score"] for ex in quantile_1_examples]
+        assert sorted(quantile_1_scores, reverse=True) == [0.95, 0.75]
+
+    def test_per_latent_and_quantile_top_k_management(self, temp_db_path, storage_format):
+        """Test that top-k is maintained per (latent_idx, quantile_idx) combination."""
+        store = MaxActStore(temp_db_path, max_examples=2, storage_format=storage_format)
+        
+        # Add examples for (latent=0, quantile=0)
+        for i, score in enumerate([0.9, 0.8, 0.7]):
+            store.add_example(
+                score=score,
+                input_ids=torch.tensor([i, i+1, i+2]),
+                latent_idx=0,
+                quantile_idx=0,
+                maintain_top_k=False
+            )
+        
+        # Add examples for (latent=0, quantile=1) 
+        for i, score in enumerate([0.95, 0.75, 0.65]):
+            store.add_example(
+                score=score,
+                input_ids=torch.tensor([i+10, i+11, i+12]),
+                latent_idx=0,
+                quantile_idx=1,
+                maintain_top_k=False
+            )
+        
+        # Add examples for (latent=1, quantile=0)
+        for i, score in enumerate([0.85, 0.55, 0.45]):
+            store.add_example(
+                score=score,
+                input_ids=torch.tensor([i+20, i+21, i+22]),
+                latent_idx=1,
+                quantile_idx=0,
+                maintain_top_k=False
+            )
+        
+        store._maintain_top_k()
+        
+        assert len(store) == 6  # 2 per (latent, quantile) combination
+        
+        # Check (latent=0, quantile=0)
+        group_00_examples = store.get_top_examples(latent_idx=0, quantile_idx=0)
+        assert len(group_00_examples) == 2
+        group_00_scores = [ex["max_score"] for ex in group_00_examples]
+        assert sorted(group_00_scores, reverse=True) == [0.9, 0.8]
+        
+        # Check (latent=0, quantile=1)
+        group_01_examples = store.get_top_examples(latent_idx=0, quantile_idx=1)
+        assert len(group_01_examples) == 2
+        group_01_scores = [ex["max_score"] for ex in group_01_examples]
+        assert sorted(group_01_scores, reverse=True) == [0.95, 0.75]
+        
+        # Check (latent=1, quantile=0)
+        group_10_examples = store.get_top_examples(latent_idx=1, quantile_idx=0)
+        assert len(group_10_examples) == 2
+        group_10_scores = [ex["max_score"] for ex in group_10_examples]
+        assert sorted(group_10_scores, reverse=True) == [0.85, 0.55]
+
+    def test_per_group_with_dataset_top_k_management(self, temp_db_path, storage_format):
+        """Test that top-k is maintained per (latent_idx, dataset) when per_dataset=True."""
+        store = MaxActStore(temp_db_path, max_examples=2, storage_format=storage_format, per_dataset=True)
+        
+        # Add examples for (latent=0, dataset=A)
+        for i, score in enumerate([0.9, 0.8, 0.7]):
+            store.add_example(
+                score=score,
+                input_ids=torch.tensor([i, i+1, i+2]),
+                latent_idx=0,
+                dataset_name="dataset_A",
+                maintain_top_k=False
+            )
+        
+        # Add examples for (latent=0, dataset=B)
+        for i, score in enumerate([0.95, 0.75, 0.65]):
+            store.add_example(
+                score=score,
+                input_ids=torch.tensor([i+10, i+11, i+12]),
+                latent_idx=0,
+                dataset_name="dataset_B",
+                maintain_top_k=False
+            )
+        
+        # Add examples for (latent=1, dataset=A)
+        for i, score in enumerate([0.85, 0.55, 0.45]):
+            store.add_example(
+                score=score,
+                input_ids=torch.tensor([i+20, i+21, i+22]),
+                latent_idx=1,
+                dataset_name="dataset_A",
+                maintain_top_k=False
+            )
+        
+        store._maintain_top_k()
+        
+        assert len(store) == 6  # 2 per (latent, dataset) combination
+        
+        # Check (latent=0, dataset=A)
+        group_0A_examples = store.get_top_examples(latent_idx=0, dataset_names=["dataset_A"])
+        assert len(group_0A_examples) == 2
+        group_0A_scores = [ex["max_score"] for ex in group_0A_examples]
+        assert sorted(group_0A_scores, reverse=True) == [0.9, 0.8]
+        
+        # Check (latent=0, dataset=B)
+        group_0B_examples = store.get_top_examples(latent_idx=0, dataset_names=["dataset_B"])
+        assert len(group_0B_examples) == 2
+        group_0B_scores = [ex["max_score"] for ex in group_0B_examples]
+        assert sorted(group_0B_scores, reverse=True) == [0.95, 0.75]
+        
+        # Check (latent=1, dataset=A)
+        group_1A_examples = store.get_top_examples(latent_idx=1, dataset_names=["dataset_A"])
+        assert len(group_1A_examples) == 2
+        group_1A_scores = [ex["max_score"] for ex in group_1A_examples]
+        assert sorted(group_1A_scores, reverse=True) == [0.85, 0.55]
+
+    def test_mixed_grouping_scenarios(self, temp_db_path, storage_format):
+        """Test mixed scenarios with some examples having latent/quantile and others not."""
+        store = MaxActStore(temp_db_path, max_examples=2, storage_format=storage_format)
+        
+        # Group 1: latent_idx=0, quantile_idx=None
+        store.add_example(0.9, torch.tensor([1, 2, 3]), latent_idx=0, maintain_top_k=False)
+        store.add_example(0.8, torch.tensor([4, 5, 6]), latent_idx=0, maintain_top_k=False)
+        store.add_example(0.7, torch.tensor([7, 8, 9]), latent_idx=0, maintain_top_k=False)  # Should be dropped
+        
+        # Group 2: latent_idx=None, quantile_idx=0
+        store.add_example(0.95, torch.tensor([10, 11, 12]), quantile_idx=0, maintain_top_k=False)
+        store.add_example(0.75, torch.tensor([13, 14, 15]), quantile_idx=0, maintain_top_k=False)
+        store.add_example(0.65, torch.tensor([16, 17, 18]), quantile_idx=0, maintain_top_k=False)  # Should be dropped
+        
+        # Group 3: latent_idx=None, quantile_idx=None (overall group)
+        store.add_example(0.85, torch.tensor([19, 20, 21]), maintain_top_k=False)
+        store.add_example(0.55, torch.tensor([22, 23, 24]), maintain_top_k=False)
+        store.add_example(0.45, torch.tensor([25, 26, 27]), maintain_top_k=False)  # Should be dropped
+        
+        store._maintain_top_k()
+        
+        assert len(store) == 6  # 2 per group
+        
+        # Verify each group separately
+        latent_0_examples = store.get_top_examples(latent_idx=0)
+        assert len(latent_0_examples) == 2
+        latent_0_scores = [ex["max_score"] for ex in latent_0_examples]
+        assert sorted(latent_0_scores, reverse=True) == [0.9, 0.8]
+        
+        quantile_0_examples = [ex for ex in store.get_top_examples() if ex["quantile_idx"] == 0 and ex["latent_idx"] is None]
+        assert len(quantile_0_examples) == 2
+        quantile_0_scores = [ex["max_score"] for ex in quantile_0_examples]
+        assert sorted(quantile_0_scores, reverse=True) == [0.95, 0.75]
+        
+        overall_examples = [ex for ex in store.get_top_examples() if ex["latent_idx"] is None and ex["quantile_idx"] is None]
+        assert len(overall_examples) == 2
+        overall_scores = [ex["max_score"] for ex in overall_examples]
+        assert sorted(overall_scores, reverse=True) == [0.85, 0.55]
+
+    def test_get_lowest_score_for_group(self, temp_db_path, storage_format):
+        """Test getting lowest scores for specific groups."""
+        store = MaxActStore(temp_db_path, storage_format=storage_format)
+        
+        # Add examples for different groups
+        store.add_example(0.9, torch.tensor([1, 2, 3]), latent_idx=0, quantile_idx=0)
+        store.add_example(0.8, torch.tensor([4, 5, 6]), latent_idx=0, quantile_idx=0)
+        store.add_example(0.95, torch.tensor([7, 8, 9]), latent_idx=1, quantile_idx=0)
+        store.add_example(0.75, torch.tensor([10, 11, 12]), latent_idx=1, quantile_idx=0)
+        
+        # Test group-specific lowest scores
+        assert store.get_lowest_score_for_group(latent_idx=0, quantile_idx=0) == 0.8
+        assert store.get_lowest_score_for_group(latent_idx=1, quantile_idx=0) == 0.75
+        
+        # Test with non-existent group
+        assert store.get_lowest_score_for_group(latent_idx=2, quantile_idx=0) is None
+
+    def test_get_group_capacity_info(self, temp_db_path, storage_format):
+        """Test getting capacity info for all groups."""
+        store = MaxActStore(temp_db_path, max_examples=3, storage_format=storage_format)
+        
+        # Add examples for different groups
+        store.add_example(0.9, torch.tensor([1, 2, 3]), latent_idx=0, quantile_idx=0)
+        store.add_example(0.8, torch.tensor([4, 5, 6]), latent_idx=0, quantile_idx=0)
+        store.add_example(0.95, torch.tensor([7, 8, 9]), latent_idx=1, quantile_idx=0)
+        store.add_example(0.75, torch.tensor([10, 11, 12]), latent_idx=1, quantile_idx=0)
+        store.add_example(0.85, torch.tensor([13, 14, 15]), latent_idx=1, quantile_idx=0)
+        
+        capacity_info = store.get_group_capacity_info()
+        
+        # Should have info for both groups
+        group_00_key = (('latent_idx', 0), ('quantile_idx', 0))
+        group_10_key = (('latent_idx', 1), ('quantile_idx', 0))
+        
+        assert group_00_key in capacity_info
+        assert group_10_key in capacity_info
+        
+        # Check group (0,0) info
+        assert capacity_info[group_00_key]['count'] == 2
+        assert capacity_info[group_00_key]['min_score'] == 0.8
+        assert capacity_info[group_00_key]['is_full'] == False  # 2 < 3
+        
+        # Check group (1,0) info  
+        assert capacity_info[group_10_key]['count'] == 3
+        assert capacity_info[group_10_key]['min_score'] == 0.75
+        assert capacity_info[group_10_key]['is_full'] == True   # 3 == 3
+
+    def test_batch_examples_with_per_group_indices(self, temp_db_path, storage_format):
+        """Test add_batch_examples with per-example latent/quantile indices."""
+        store = MaxActStore(temp_db_path, max_examples=2, storage_format=storage_format)
+        
+        batch_size = 4
+        scores = torch.tensor([0.9, 0.8, 0.95, 0.75])
+        input_ids = torch.randint(1, 100, (batch_size, 5))
+        
+        # Different latent_idx per example
+        latent_indices = torch.tensor([0, 0, 1, 1])  # First 2 to latent 0, next 2 to latent 1
+        quantile_indices = torch.tensor([0, 1, 0, 1])  # Alternating quantiles
+        
+        store.add_batch_examples(
+            scores_per_example=scores,
+            input_ids_batch=input_ids,
+            latent_idx=latent_indices,
+            quantile_idx=quantile_indices
+        )
+        
+        # Should have 4 examples total (each group gets max 2, but we have 4 different groups)
+        assert len(store) == 4
+        
+        # Verify each group has 1 example
+        examples_00 = store.get_top_examples(latent_idx=0, quantile_idx=0)
+        examples_01 = store.get_top_examples(latent_idx=0, quantile_idx=1)
+        examples_10 = store.get_top_examples(latent_idx=1, quantile_idx=0)
+        examples_11 = store.get_top_examples(latent_idx=1, quantile_idx=1)
+        
+        assert len(examples_00) == 1
+        assert len(examples_01) == 1
+        assert len(examples_10) == 1
+        assert len(examples_11) == 1
+        
+        # Verify scores match expectations
+        assert torch.isclose(torch.tensor(examples_00[0]["max_score"]), torch.tensor(0.9))
+        assert torch.isclose(torch.tensor(examples_01[0]["max_score"]), torch.tensor(0.8))
+        assert torch.isclose(torch.tensor(examples_10[0]["max_score"]), torch.tensor(0.95))
+        assert torch.isclose(torch.tensor(examples_11[0]["max_score"]), torch.tensor(0.75))

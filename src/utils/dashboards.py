@@ -26,13 +26,12 @@ from tiny_dashboard.html_utils import (
     scripts as default_scripts,
 )
 from tiny_dashboard.utils import apply_chat
-
 from src.utils.visualization import (
     filter_examples_by_search,
     create_examples_html,
     render_streamlit_html,
 )
-        
+from src.utils.model import has_thinking
 
 class AbstractOnlineDiffingDashboard(ABC):
     """
@@ -695,7 +694,14 @@ class SteeringDashboard:
                     value=True,
                     help="Enable sampling (if disabled, uses greedy decoding)"
                 )
-            
+
+                if has_thinking(self.method.tokenizer):
+                    enable_thinking = st.checkbox(
+                        "Enable Thinking",
+                        value=False,
+                        help="Enable thinking (if disabled, prefills <think> </think> tokens)"
+                    )
+                
             st.markdown("#### Steering Settings")
             
             # Steering controls within the form
@@ -716,8 +722,7 @@ class SteeringDashboard:
                 # Apply chat formatting if enabled
                 formatted_prompt = prompt
                 if use_chat:
-                    from tiny_dashboard.utils import apply_chat
-                    formatted_prompt = apply_chat(prompt, self.method.tokenizer, add_bos=False)
+                    formatted_prompt = apply_chat(prompt, self.method.tokenizer, add_bos=False, enable_thinking=enable_thinking)
                 
                 # Generate both versions
                 with st.spinner("Generating text..."):
@@ -825,7 +830,7 @@ class MaxActivationDashboardComponent:
         """
         
         Args:
-            max_store: MaxActStore instance
+            max_store: ReadOnlyMaxActStore or MaxActStore instance
             title: Title for the dashboard
             initial_batch_size: Number of examples to load initially
             batch_size: Number of examples to load in each subsequent batch

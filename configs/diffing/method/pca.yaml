@@ -11,7 +11,7 @@ training:
   local_shuffling: true
   local_shuffling_shard_size: 1_000_000
   workers: 16
-  overwrite: true
+  overwrite: false
   
 datasets:
   use_chat_dataset: true
@@ -30,3 +30,10 @@ layers: null  # If null, train on all available layers. Provide list of layers t
 # Analysis configuration
 analysis:
   enabled: true 
+
+  max_activating_examples:
+    enabled: true
+    n_max_activations: 100
+    max_num_samples: 50000
+    split: "train"
+    overwrite: true

@@ -21,6 +21,10 @@ from omegaconf import DictConfig, OmegaConf
 from loguru import logger
 import json
 from collections import defaultdict
+import streamlit as st
+from src.utils.dashboards import MaxActivationDashboardComponent
+from src.utils.max_act_store import MaxActStore, ReadOnlyMaxActStore
+
 from .diffing_method import DiffingMethod
 from src.utils.activations import get_layer_indices
 from src.utils.dictionary.analysis import build_push_sae_difference_latent_df, make_plots
@@ -379,9 +383,6 @@ class SAEDifferenceMethod(DiffingMethod):
 
     def _render_maxact_tab(self, selected_sae_info):
         """Render the MaxAct tab using MaxActivationDashboardComponent."""
-        import streamlit as st
-        from src.utils.dashboards import MaxActivationDashboardComponent
-        from src.utils.max_act_store import MaxActStore
 
         # Use the globally selected SAE
         dictionary_name = selected_sae_info['dictionary_name']
@@ -410,10 +411,9 @@ class SAEDifferenceMethod(DiffingMethod):
         assert self.tokenizer is not None, "Tokenizer must be available for MaxActStore visualization"
         
         # Create MaxActStore instance
-        max_store = MaxActStore(
+        max_store = ReadOnlyMaxActStore(
             example_db_path, 
             tokenizer=self.tokenizer,
-            storage_format=None  # Read from existing config
         )
         
         # Create and display the dashboard component

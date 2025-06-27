@@ -51,7 +51,7 @@ def combine_normalizer(
             running_stats_2.merge(cache.activation_cache_2.running_stats)
 
     mean = torch.stack([running_stats_1.mean, running_stats_2.mean], dim=0)
-    # we want unbiased std for the normalizer
+    # we want unbiased std for the normalizer
     std = torch.stack([running_stats_1.std(unbiased=False), running_stats_2.std(unbiased=False)], dim=0)
     return mean, std
 
@@ -324,6 +324,7 @@ def setup_training_datasets(
         normalize_mean,
         normalize_std,
     )
+
 
 
 def create_training_dataloader(
@@ -654,6 +655,13 @@ def train_crosscoder_for_layer(
 
     if cfg.diffing.method.upload.model:
         hf_repo_id = push_dictionary_model(Path(checkpoint_dir) / "model_final.pt")
+    else:
+        logger.warning(
+            "Not uploading model to Hugging Face because upload.model is False, which can break downstream code. Only use this if you know what you are doing."
+        )
+        raise ValueError(
+            "Upload model is False, only use for debugging (because downstream code will load from hf only)."
+        )
 
     # Collect training metrics
     training_metrics = {

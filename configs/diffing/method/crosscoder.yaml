@@ -65,12 +65,12 @@ analysis:
 
   latent_activations: # Collect latent activations for all datasets and layers
     enabled: true
-    split: "validation"
+    split: "train"
     overwrite: false # Overwrite existing latent activations and max activations
     upload_to_hub: false # Upload max activations to hub
     n_max_activations: 100 # Number of max activations to collect
     min_threshold: 1e-4 # Minimum activation threshold to consider
-    max_num_samples: 1000 # Maximum number of samples to collect per dataset
+    max_num_samples: 50000 # Maximum number of samples to collect per dataset
 
 upload:
   model: true
