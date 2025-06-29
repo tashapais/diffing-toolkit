@@ -180,6 +180,13 @@ def main():
     if not selected_organism:
         return
     
+    tmp_cfg = load_config(selected_model, selected_organism, None, cfg_overwrites)
+    
+    # Create Hugging Face model URL
+    model_id = tmp_cfg.organism.finetuned_model.model_id
+    hf_url = f"https://huggingface.co/{model_id}"
+    st.markdown(f"**Model:** [{model_id}]({hf_url})")
+
     # Method selection
     available_methods = available_results[selected_model][selected_organism]
     if not available_methods:

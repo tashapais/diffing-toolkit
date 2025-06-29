@@ -46,6 +46,7 @@ def combine_normalizer(
     Compute the normalizer for a dictionary of caches.
     """
     if isinstance(caches[0], Subset):
+        logger.warning("Detected Subset, recomputing normalizer with sampling...")
         mean, std = recompute_normalizer(
             caches,
             subsample_size=subsample_size,
@@ -149,6 +150,10 @@ def recompute_normalizer(
                 )
                 for cache in caches
             ]
+            + [
+                type(cache).__name__
+                for cache in caches
+            ]
             + [layer, n]
         ).encode()
     ).hexdigest()
@@ -166,7 +171,7 @@ def recompute_normalizer(
     sample = caches[0][0]
     num_resamples = subsample_size
     num_resamples_per_dataset = num_resamples // len(caches)
-    running_stats = RunningStatWelford(shape=(sample.shape[0],), device=device)
+    running_stats = RunningStatWelford(shape=sample.shape, device=device)
 
     for j, cache in enumerate(caches):
         sample_indices = torch.randint(0, len(cache), (num_resamples_per_dataset,))
@@ -467,7 +472,6 @@ def crosscoder_run_name(
     if (
         method_cfg.datasets.normalization.enabled
         and method_cfg.datasets.normalization.target_rms is not None
-        and method_cfg.datasets.normalization.target_rms != 200
     ):
         run_name += f"-t{int(method_cfg.datasets.normalization.target_rms)}"
 
@@ -642,16 +646,18 @@ def train_crosscoder_for_layer(
             cfg,
             layer_idx,
             normalizer_function=(
-                lambda x: (
+                (lambda x: (
                     combine_normalizer(
                         x,
                         device=device,
                         layer=layer_idx,
                         n=cfg.model.ignore_first_n_tokens_per_sample_during_training,
-                    )
+                        subsample_size=cfg.diffing.method.datasets.normalization.subsample_size,
+                        batch_size=cfg.diffing.method.datasets.normalization.batch_size,
+                    ))
+                )
                     if cfg.diffing.method.datasets.normalization.enabled
                     else None
-                )
             ),
             dataset_processing_function=lambda x: skip_first_n_tokens(
                 x, cfg.model.ignore_first_n_tokens_per_sample_during_training
@@ -894,7 +900,7 @@ def train_sae_difference_for_layer(
                             cache_dir=cfg.diffing.method.datasets.normalization.cache_dir,
                             layer=layer_idx,
                             device=device,
-                            n=base_model_cfg.ignore_first_n_tokens_per_sample_during_training, # needed for cache key
+                            n=cfg.model.ignore_first_n_tokens_per_sample_during_training, # needed for cache key
                         )
                     )
                 )

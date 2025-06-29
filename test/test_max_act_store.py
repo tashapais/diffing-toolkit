@@ -1357,6 +1357,287 @@ class TestMaxActStore:
         examples = store.get_top_examples()
         assert all(ex["dataset_name"] == "shutdown_test" for ex in examples) 
 
+    def test_async_writer_multiple_sequences_with_latent_indices(self, temp_db_path, storage_format):
+        """Test async writer with two different sequences, each with a single latent index."""
+        store = MaxActStore(temp_db_path, max_examples=5, storage_format=storage_format)
+        
+        with store.create_async_writer(buffer_size=10) as writer:
+            # Sequence 1: tokens [1, 2, 3, 4, 5] with latent_idx=0
+            seq1_input_ids = torch.tensor([[1, 2, 3, 4, 5]])
+            seq1_scores = torch.tensor([0.8])
+            seq1_latent_idx = torch.tensor([0])
+            seq1_scores_per_token = torch.rand(1, 5) * 0.8
+            
+            writer.add_batch_examples(
+                scores_per_example=seq1_scores,
+                input_ids_batch=seq1_input_ids,
+                scores_per_token_batch=seq1_scores_per_token,
+                latent_idx=seq1_latent_idx,
+                additional_data_batch=[{"sequence_name": "sequence_1"}]
+            )
+            
+            # Sequence 2: tokens [10, 11, 12, 13, 14, 15] with latent_idx=0  
+            seq2_input_ids = torch.tensor([[10, 11, 12, 13, 14, 15]])
+            seq2_scores = torch.tensor([0.9])
+            seq2_latent_idx = torch.tensor([0])
+            seq2_scores_per_token = torch.rand(1, 6) * 0.7
+            
+            writer.add_batch_examples(
+                scores_per_example=seq2_scores,
+                input_ids_batch=seq2_input_ids,
+                scores_per_token_batch=seq2_scores_per_token,
+                latent_idx=seq2_latent_idx,
+                additional_data_batch=[{"sequence_name": "sequence_2"}]
+            )
+        
+        # Should have 2 examples total (one from each sequence)
+        assert len(store) == 2
+        
+        # Verify both examples are for latent_idx=0
+        latent_0_examples = store.get_top_examples(latent_idx=0)
+        assert len(latent_0_examples) == 2
+        
+        # Verify examples are sorted by score (descending)
+        scores = [ex["max_score"] for ex in latent_0_examples]
+        assert scores == sorted(scores, reverse=True)
+        assert torch.isclose(torch.tensor(scores[0]), torch.tensor(0.9), atol=1e-4)  # sequence_2 has higher score
+        assert torch.isclose(torch.tensor(scores[1]), torch.tensor(0.8), atol=1e-4)  # sequence_1 has lower score
+        
+        # Verify sequence data is preserved correctly
+        seq1_example = next(ex for ex in latent_0_examples if ex["sequence_name"] == "sequence_1")
+        seq2_example = next(ex for ex in latent_0_examples if ex["sequence_name"] == "sequence_2")
+        
+        assert seq1_example["input_ids"] == [1, 2, 3, 4, 5]
+        assert seq1_example["latent_idx"] == 0
+        assert len(seq1_example["input_ids"]) == 5
+        
+        assert seq2_example["input_ids"] == [10, 11, 12, 13, 14, 15]
+        assert seq2_example["latent_idx"] == 0
+        assert len(seq2_example["input_ids"]) == 6
+        
+        # Verify activation details are preserved for both sequences
+        seq1_details = store.get_example_details(seq1_example["example_id"])
+        seq2_details = store.get_example_details(seq2_example["example_id"])
+        
+        assert "scores_per_token" in seq1_details
+        assert "scores_per_token" in seq2_details
+        assert len(seq1_details["scores_per_token"]) == 5
+        assert len(seq2_details["scores_per_token"]) == 6
+
+    def test_async_writer_multiple_sequences_with_multiple_latent_indices(self, temp_db_path, storage_format):
+        """Test async writer with two different sequences, each with multiple latent indices. Same sequence per batch."""
+        store = MaxActStore(temp_db_path, max_examples=5, storage_format=storage_format)
+        # Sequence 1: tokens [1, 2, 3, 4, 5] with latent_idx=0
+        seq1_input_ids = [torch.tensor([1, 2, 3, 4, 5]), torch.tensor([1, 2, 3, 4, 5])]
+        seq1_scores = torch.tensor([0.8, 0.7])
+        seq1_latent_idx = torch.tensor([0, 1])
+        seq1_scores_per_token = torch.rand(2, 5) * 0.8
+        
+        # Sequence 2: tokens [10, 11, 12, 13, 14, 15] with latent_idx=0  
+        seq2_input_ids = [torch.tensor([10, 11, 12, 13, 14, 15]), torch.tensor([10, 11, 12, 13, 14, 15])]
+        seq2_scores = torch.tensor([0.9, 0.8])
+        seq2_latent_idx = torch.tensor([0, 1])
+        seq2_scores_per_token = torch.rand(2, 6) * 0.7
+
+        # Third batch with latents from both sequences
+        seq3_input_ids = [torch.tensor([1, 2, 3, 4, 5]), torch.tensor([10, 11, 12, 13, 14, 15])]
+        seq3_scores = torch.tensor([0.8, 0.7])
+        seq3_latent_idx = torch.tensor([0, 1])
+        seq3_scores_per_token = [torch.rand(1, 5) * 0.8, torch.rand(1, 6) * 0.8]
+
+        with store.create_async_writer(buffer_size=10) as writer:
+            
+            writer.add_batch_examples(
+                scores_per_example=seq1_scores,
+                input_ids_batch=seq1_input_ids,
+                scores_per_token_batch=seq1_scores_per_token,
+                latent_idx=seq1_latent_idx,
+                additional_data_batch=[{"sequence_name": "sequence_1"}, {"sequence_name": "sequence_1"}]
+            )
+            
+            
+            writer.add_batch_examples(
+                scores_per_example=seq2_scores,
+                input_ids_batch=seq2_input_ids,
+                scores_per_token_batch=seq2_scores_per_token,
+                latent_idx=seq2_latent_idx,
+                additional_data_batch=[{"sequence_name": "sequence_2"}, {"sequence_name": "sequence_2"}]
+            )
+            
+        # Should have 4 examples total (two from each sequence)
+        assert len(store) == 4
+        
+        # Should have 2 sequences 
+        assert store.get_num_sequences() == 2
+        
+        # Verify both examples are for latent_idx=0
+        latent_0_examples = store.get_top_examples(latent_idx=0)
+        assert len(latent_0_examples) == 2
+        latent_1_examples = store.get_top_examples(latent_idx=1)
+        assert len(latent_1_examples) == 2
+        
+        # Verify examples are sorted by score (descending)
+        scores = [ex["max_score"] for ex in latent_0_examples]
+        assert scores == sorted(scores, reverse=True)
+        assert torch.isclose(torch.tensor(scores[0]), torch.tensor(0.9), atol=1e-4)  # sequence_2 has higher score
+        assert torch.isclose(torch.tensor(scores[1]), torch.tensor(0.8), atol=1e-4)  # sequence_1 has lower score
+
+        scores = [ex["max_score"] for ex in latent_1_examples]
+        assert scores == sorted(scores, reverse=True)
+        assert torch.isclose(torch.tensor(scores[0]), torch.tensor(0.8), atol=1e-4)  # sequence_2 has higher score
+        assert torch.isclose(torch.tensor(scores[1]), torch.tensor(0.7), atol=1e-4)  # sequence_1 has lower score
+        # Verify sequence data is preserved correctly for latent_idx=0
+        seq1_example = next(ex for ex in latent_0_examples if ex["sequence_name"] == "sequence_1")
+        seq2_example = next(ex for ex in latent_0_examples if ex["sequence_name"] == "sequence_2")
+        
+        assert seq1_example["input_ids"] == [1, 2, 3, 4, 5]
+        assert seq1_example["latent_idx"] == 0
+        assert len(seq1_example["input_ids"]) == 5
+        
+        assert seq2_example["input_ids"] == [10, 11, 12, 13, 14, 15]
+        assert seq2_example["latent_idx"] == 0
+        assert len(seq2_example["input_ids"]) == 6
+        
+        # Verify sequence data is preserved correctly for latent_idx=1
+        seq1_example_lat1 = next(ex for ex in latent_1_examples if ex["sequence_name"] == "sequence_1")
+        seq2_example_lat1 = next(ex for ex in latent_1_examples if ex["sequence_name"] == "sequence_2")
+        
+        assert seq1_example_lat1["input_ids"] == [1, 2, 3, 4, 5]
+        assert seq1_example_lat1["latent_idx"] == 1
+        assert len(seq1_example_lat1["input_ids"]) == 5
+        
+        assert seq2_example_lat1["input_ids"] == [10, 11, 12, 13, 14, 15]
+        assert seq2_example_lat1["latent_idx"] == 1
+        assert len(seq2_example_lat1["input_ids"]) == 6
+        
+        # Verify activation details are preserved for both sequences and both latents
+        seq1_details = store.get_example_details(seq1_example["example_id"])
+        seq2_details = store.get_example_details(seq2_example["example_id"])
+        seq1_details_lat1 = store.get_example_details(seq1_example_lat1["example_id"])
+        seq2_details_lat1 = store.get_example_details(seq2_example_lat1["example_id"])
+        
+        assert "scores_per_token" in seq1_details
+        assert "scores_per_token" in seq2_details
+        assert "scores_per_token" in seq1_details_lat1
+        assert "scores_per_token" in seq2_details_lat1
+        assert len(seq1_details["scores_per_token"]) == 5
+        assert len(seq2_details["scores_per_token"]) == 6
+        assert len(seq1_details_lat1["scores_per_token"]) == 5
+        assert len(seq2_details_lat1["scores_per_token"]) == 6
+
+
+
+    def test_async_writer_multiple_sequences_with_multiple_latent_indices_in_same_batch(self, temp_db_path, storage_format):
+        """Test async writer with two different sequences, each with multiple latent indices. Same sequence per batch."""
+        store = MaxActStore(temp_db_path, max_examples=5, storage_format=storage_format)
+        # Sequence 1: tokens [1, 2, 3, 4, 5] with latent_idx=0
+        seq1_input_ids = [torch.tensor([1, 2, 3, 4, 5]), torch.tensor([1, 2, 3, 4, 5])]
+        seq1_scores = torch.tensor([0.8, 0.7])
+        seq1_latent_idx = torch.tensor([0, 1])
+        seq1_scores_per_token = torch.rand(2, 5) * 0.8
+        
+        # Sequence 2: tokens [10, 11, 12, 13, 14, 15] with latent_idx=0  
+        seq2_input_ids = [torch.tensor([10, 11, 12, 13, 14, 15]), torch.tensor([10, 11, 12, 13, 14, 15])]
+        seq2_scores = torch.tensor([0.9, 0.8])
+        seq2_latent_idx = torch.tensor([0, 1])
+        seq2_scores_per_token = torch.rand(2, 6) * 0.7
+
+        # Third batch with latents from both sequences
+        batch_input_ids = [torch.tensor([1, 2, 3, 4, 5]), torch.tensor([10, 11, 12, 13, 14, 15])]
+        batch_scores = torch.tensor([10, 10])
+        batch_latent_idx = torch.tensor([0, 1])
+        batch_scores_per_token = [torch.rand(5) * 0.8, torch.rand(6) * 0.8]
+
+        with store.create_async_writer(buffer_size=10) as writer:
+            
+            writer.add_batch_examples(
+                scores_per_example=seq1_scores,
+                input_ids_batch=seq1_input_ids,
+                scores_per_token_batch=seq1_scores_per_token,
+                latent_idx=seq1_latent_idx,
+                additional_data_batch=[{"sequence_name": "sequence_1"}, {"sequence_name": "sequence_1"}]
+            )
+            
+            
+            writer.add_batch_examples(
+                scores_per_example=seq2_scores,
+                input_ids_batch=seq2_input_ids,
+                scores_per_token_batch=seq2_scores_per_token,
+                latent_idx=seq2_latent_idx,
+                additional_data_batch=[{"sequence_name": "sequence_2"}, {"sequence_name": "sequence_2"}]
+            )
+
+            writer.add_batch_examples(
+                scores_per_example=batch_scores,
+                input_ids_batch=batch_input_ids,
+                scores_per_token_batch=batch_scores_per_token,
+                latent_idx=batch_latent_idx,
+                additional_data_batch=[{"sequence_name": "sequence_1"}, {"sequence_name": "sequence_2"}]
+            )
+            
+        # Should have 6 examples total (two from each sequence)
+        assert len(store) == 6
+        
+        # Should have 2 sequences 
+        assert store.get_num_sequences() == 2
+        
+        # Verify both examples are for latent_idx=0
+        latent_0_examples = store.get_top_examples(latent_idx=0)
+        assert len(latent_0_examples) == 3
+        latent_1_examples = store.get_top_examples(latent_idx=1)
+        assert len(latent_1_examples) == 3
+        
+        # Verify examples are sorted by score (descending)
+        scores = [ex["max_score"] for ex in latent_0_examples]
+        assert scores == sorted(scores, reverse=True)
+        assert torch.isclose(torch.tensor(scores[0]), torch.tensor(10.0), atol=1e-4)  # sequence_2 has higher score
+        assert torch.isclose(torch.tensor(scores[1]), torch.tensor(0.9), atol=1e-4)  # sequence_2 has higher score
+        assert torch.isclose(torch.tensor(scores[2]), torch.tensor(0.8), atol=1e-4)  # sequence_1 has lower score
+
+        scores = [ex["max_score"] for ex in latent_1_examples]
+        assert scores == sorted(scores, reverse=True)
+        assert torch.isclose(torch.tensor(scores[0]), torch.tensor(10.0), atol=1e-4)  # sequence_2 has higher score
+        assert torch.isclose(torch.tensor(scores[1]), torch.tensor(0.8), atol=1e-4)  # sequence_2 has higher score
+        assert torch.isclose(torch.tensor(scores[2]), torch.tensor(0.7), atol=1e-4)  # sequence_1 has lower score
+
+        # Verify sequence data is preserved correctly for latent_idx=0
+        seq1_example = next(ex for ex in latent_0_examples if ex["sequence_name"] == "sequence_1")
+        seq2_example = next(ex for ex in latent_0_examples if ex["sequence_name"] == "sequence_2")
+        
+        assert seq1_example["input_ids"] == [1, 2, 3, 4, 5]
+        assert seq1_example["latent_idx"] == 0
+        assert len(seq1_example["input_ids"]) == 5
+        
+        assert seq2_example["input_ids"] == [10, 11, 12, 13, 14, 15]
+        assert seq2_example["latent_idx"] == 0
+        assert len(seq2_example["input_ids"]) == 6
+        
+        # Verify sequence data is preserved correctly for latent_idx=1
+        seq1_example_lat1 = next(ex for ex in latent_1_examples if ex["sequence_name"] == "sequence_1")
+        seq2_example_lat1 = next(ex for ex in latent_1_examples if ex["sequence_name"] == "sequence_2")
+        
+        assert seq1_example_lat1["input_ids"] == [1, 2, 3, 4, 5]
+        assert seq1_example_lat1["latent_idx"] == 1
+        assert len(seq1_example_lat1["input_ids"]) == 5
+        
+        assert seq2_example_lat1["input_ids"] == [10, 11, 12, 13, 14, 15]
+        assert seq2_example_lat1["latent_idx"] == 1
+        assert len(seq2_example_lat1["input_ids"]) == 6
+        
+        # Verify activation details are preserved for both sequences and both latents
+        seq1_details = store.get_example_details(seq1_example["example_id"])
+        seq2_details = store.get_example_details(seq2_example["example_id"])
+        seq1_details_lat1 = store.get_example_details(seq1_example_lat1["example_id"])
+        seq2_details_lat1 = store.get_example_details(seq2_example_lat1["example_id"])
+        
+        assert "scores_per_token" in seq1_details
+        assert "scores_per_token" in seq2_details
+        assert "scores_per_token" in seq1_details_lat1
+        assert "scores_per_token" in seq2_details_lat1
+        assert len(seq1_details["scores_per_token"]) == 5
+        assert len(seq2_details["scores_per_token"]) == 6
+        assert len(seq1_details_lat1["scores_per_token"]) == 5
+        assert len(seq2_details_lat1["scores_per_token"]) == 6
 
     def test_per_latent_top_k_management(self, temp_db_path, storage_format):
         """Test that top-k is maintained per latent_idx."""
