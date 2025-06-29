@@ -32,6 +32,10 @@ class DifferenceCache:
     def config(self):
         return self.activation_cache_1.config
 
+    @property
+    def sequence_ranges(self):
+        return self.activation_cache_1.sequence_ranges
+
 
 class TokenCache:
     """

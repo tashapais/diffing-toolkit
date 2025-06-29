@@ -27,7 +27,7 @@ from src.utils.dictionary.latent_scaling.utils import (
     betas_exist,
 )
 
-from src.utils.dictionary.training import setup_training_datasets
+from src.utils.dictionary.training import setup_training_datasets, skip_first_n_tokens
 from src.utils.dictionary.utils import load_dictionary_model, load_latent_df
 
 
@@ -263,7 +263,8 @@ def compute_scalers_from_config(
     # Setup paths
     # Load validation dataset
     train_dataset, val_dataset, _, _, _ = setup_training_datasets(
-        cfg, layer, overwrite_num_samples=num_samples, overwrite_local_shuffling=False
+        cfg, layer, overwrite_num_samples=num_samples, overwrite_local_shuffling=False,
+        dataset_processing_function=lambda x: skip_first_n_tokens(x, cfg.model.ignore_first_n_tokens_per_sample_during_training)
     )
     if ls_cfg.dataset_split == "train":
         dataset = train_dataset

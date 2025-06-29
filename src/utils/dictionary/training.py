@@ -36,10 +36,25 @@ from ..cache import DifferenceCache
 
 def combine_normalizer(
     caches: List[PairedActivationCache],
+    device: str = "cpu",
+    layer: int = None,
+    n: int = 0,
+    subsample_size: int = 1000,
+    batch_size: int = 4096,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Compute the normalizer for a dictionary of caches.
     """
+    if isinstance(caches[0], Subset):
+        mean, std = recompute_normalizer(
+            caches,
+            subsample_size=subsample_size,
+            batch_size=batch_size,
+            device=device,
+            layer=layer,
+            n=n,
+        )
+        return mean, std
     running_stats_1 = None
     running_stats_2 = None
     for cache in caches:
@@ -52,12 +67,15 @@ def combine_normalizer(
 
     mean = torch.stack([running_stats_1.mean, running_stats_2.mean], dim=0)
     # we want unbiased std for the normalizer
-    std = torch.stack([running_stats_1.std(unbiased=False), running_stats_2.std(unbiased=False)], dim=0)
+    std = torch.stack(
+        [running_stats_1.std(unbiased=False), running_stats_2.std(unbiased=False)],
+        dim=0,
+    )
     return mean, std
 
 
 def setup_sae_cache(
-    target: str, paired_cache: PairedActivationCache
+    target: str, paired_cache: PairedActivationCache, n: int = 0
 ) -> ActivationCache:
     """
     Setup caches for SAE training based on target type.
@@ -65,6 +83,7 @@ def setup_sae_cache(
     Args:
         target: Training target ("base", "ft", "difference_bft", "difference_ftb")
         paired_cache: PairedActivationCache
+        k: int, number of tokens to skip from the beginning of each sequence
 
     Returns:
         Processed cache for SAE training
@@ -84,26 +103,53 @@ def setup_sae_cache(
     else:
         raise ValueError(f"Invalid SAE target: {target}")
 
+    if n > 0:
+        processed_cache = skip_first_n_tokens(processed_cache, n)
+
     return processed_cache
 
 
-def recompute_diff_normalizer(
+def recompute_normalizer(
     caches: List[PairedActivationCache],
-    target: str,
     subsample_size: int,
     layer: int,
     batch_size: int = 4096,
+    n: int = 0,
     cache_dir: str = None,
+    device: str = "cpu",
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Recompute the normalizer for a dictionary of caches.
+
+    Args:
+        caches: List of PairedActivationCache
+        subsample_size: Number of samples to use for computing the normalizer
+        layer: Layer index
+        batch_size: Batch size
+        n: Number of tokens to skip from the beginning of each sequence
+        cache_dir: Directory to cache the normalizer
     """
+
     # Compute hash by hashing the configs of all caches
     cache_hash = hashlib.sha256(
         json.dumps(
-            [cache.activation_cache_1.config for cache in caches]
-            + [cache.activation_cache_2.config for cache in caches]
-            + [layer]
+            [
+                (
+                    cache.activation_cache_1.config
+                    if not isinstance(cache, Subset)
+                    else cache.dataset.activation_cache_1.config
+                )
+                for cache in caches
+            ]
+            + [
+                (
+                    cache.activation_cache_2.config
+                    if not isinstance(cache, Subset)
+                    else cache.dataset.activation_cache_2.config
+                )
+                for cache in caches
+            ]
+            + [layer, n]
         ).encode()
     ).hexdigest()
     if cache_dir is not None:
@@ -115,34 +161,15 @@ def recompute_diff_normalizer(
             return mean, std
 
     logger.info(f"Recomputing normalizer for {len(caches)} caches")
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    running_stats_1 = None
-    running_stats_2 = None
-    for cache in caches:
-        if running_stats_1 is None:
-            running_stats_1 = cache.activation_cache_1.running_stats
-            running_stats_2 = cache.activation_cache_2.running_stats
-        else:
-            running_stats_1.merge(cache.activation_cache_1.running_stats)
-            running_stats_2.merge(cache.activation_cache_2.running_stats)
-
-    if target == "difference_bft":
-        mean = running_stats_1.mean - running_stats_2.mean
-    elif target == "difference_ftb":
-        mean = running_stats_2.mean - running_stats_1.mean
-    else:
-        raise ValueError(f"Invalid Difference target: {target}")
 
     # Compute std by resampling
+    sample = caches[0][0]
     num_resamples = subsample_size
     num_resamples_per_dataset = num_resamples // len(caches)
-    running_stats = RunningStatWelford(
-        shape=(running_stats_1.mean.shape[0],), device=running_stats_1.mean.device
-    )
+    running_stats = RunningStatWelford(shape=(sample.shape[0],), device=device)
 
     for j, cache in enumerate(caches):
-        diff_cache = setup_sae_cache(target=target, paired_cache=cache)
-        sample_indices = torch.randint(0, len(diff_cache), (num_resamples_per_dataset,))
+        sample_indices = torch.randint(0, len(cache), (num_resamples_per_dataset,))
         # Sort the indices for better cache locality
         sample_indices = sample_indices[torch.argsort(sample_indices)]
         # Process in batches
@@ -154,11 +181,12 @@ def recompute_diff_normalizer(
         ):
             running_stats.update(
                 torch.stack(
-                    [diff_cache[i] for i in sample_indices[i : i + batch_size]], dim=0
+                    [cache[i] for i in sample_indices[i : i + batch_size]], dim=0
                 )
             )
 
     std = running_stats.std(unbiased=False)
+    mean = running_stats.mean
 
     if cache_dir is not None:
         cache_dir.mkdir(parents=True, exist_ok=True)
@@ -166,6 +194,22 @@ def recompute_diff_normalizer(
         torch.save(std, cache_dir / "std.pt")
 
     return mean, std
+
+
+def skip_first_n_tokens(cache: Any, n: int) -> Subset:
+    """
+    Skip the first k tokens of each sequence in the cache.
+    """
+    if n == 0:
+        return cache
+    sequence_ranges = cache.activation_cache_1.sequence_ranges[
+        :-1
+    ]  # last one is the end of the cache
+    mask = torch.ones(len(cache), dtype=torch.bool)
+    for i in range(n):
+        mask[sequence_ranges + i] = False
+    indices = torch.where(mask)[0]
+    return Subset(cache, indices)
 
 
 def setup_training_datasets(
@@ -216,17 +260,17 @@ def setup_training_datasets(
         dataset_name: caches[dataset_name][layer] for dataset_name in caches
     }  # Dict {dataset_name: PairedActivationCache}
 
-    if normalizer_function is not None:
-        normalize_mean, normalize_std = normalizer_function(list(caches.values()))
-    else:
-        normalize_mean = None
-        normalize_std = None
-
     if dataset_processing_function is not None:
         caches = {
             dataset_name: dataset_processing_function(caches[dataset_name])
             for dataset_name in caches
         }
+
+    if normalizer_function is not None:
+        normalize_mean, normalize_std = normalizer_function(list(caches.values()))
+    else:
+        normalize_mean = None
+        normalize_std = None
 
     # Determine number of samples per dataset
     num_samples_per_dataset = [len(caches[dataset_name]) for dataset_name in caches]
@@ -243,7 +287,7 @@ def setup_training_datasets(
     logger.info(f"Using {sum(num_samples_per_dataset)} samples in total")
     for dataset_name, num_samples in zip(caches.keys(), num_samples_per_dataset):
         logger.info(f"\tUsing {num_samples} samples for {dataset_name}")
-    
+
     # Create training dataset
     train_dataset = ConcatDataset(
         [
@@ -251,7 +295,6 @@ def setup_training_datasets(
             for dataset_name, num_samples in zip(caches.keys(), num_samples_per_dataset)
         ]
     )
-
 
     # Apply local shuffling if enabled
     if training_cfg.local_shuffling and (
@@ -324,7 +367,6 @@ def setup_training_datasets(
         normalize_mean,
         normalize_std,
     )
-
 
 
 def create_training_dataloader(
@@ -414,20 +456,31 @@ def crosscoder_run_name(
         )
     elif model_type == "batch-top-k":
         run_name = (
-            f"{base_model_cfg.name}-{cfg.organism.name}-L{layer}-k{k}-lr{lr:.0e}-x{expansion_factor}"
+            f"{base_model_cfg.name}-{cfg.organism.name}-L{layer}"
             + f"-{code_normalization.capitalize()}"
         )
     else:
         raise ValueError(f"Invalid model type: {model_type}")
-    
-    if method_cfg.datasets.normalization.enabled and method_cfg.datasets.normalization.target_rms is not None and method_cfg.datasets.normalization.target_rms != 200:
-        run_name += f"-trms{int(method_cfg.datasets.normalization.target_rms)}"
+
+    if cfg.model.ignore_first_n_tokens_per_sample_during_training > 0:
+        run_name += f"-s{cfg.model.ignore_first_n_tokens_per_sample_during_training}"
+    if (
+        method_cfg.datasets.normalization.enabled
+        and method_cfg.datasets.normalization.target_rms is not None
+        and method_cfg.datasets.normalization.target_rms != 200
+    ):
+        run_name += f"-t{int(method_cfg.datasets.normalization.target_rms)}"
+
+    run_name += f"-k{k}-lr{lr:.0e}-x{expansion_factor}"
 
     run_name = run_name.replace(".", "p")
 
-    if len("science-of-finetuning/"+run_name) > 96:
-        run_name = run_name.replace(cfg.organism.name, "".join([word[0] for word in cfg.organism.name.split("_")]))
-        if len("science-of-finetuning/"+run_name) > 96:
+    if len("science-of-finetuning/" + run_name) > 96:
+        run_name = run_name.replace(
+            cfg.organism.name,
+            "".join([word[0] for word in cfg.organism.name.split("_")]),
+        )
+        if len("science-of-finetuning/" + run_name) > 96:
             raise ValueError(f"Run name too long: {run_name}")
 
     return run_name
@@ -447,23 +500,31 @@ def sae_difference_run_name(
     target = method_cfg.training.target
     target_short = target.split("_")[1]  # "bft" or "ftb"
 
-    run_name = (
-        f"SAEdiff_{target_short.replace("difference_", "")}-{base_model_cfg.name}-{cfg.organism.name}-L{layer}-k{k}-x{expansion_factor}-lr{lr:.0e}"
-    )
+    run_name = f"SAEdiff_{target_short.replace("difference_", "")}-{base_model_cfg.name}-{cfg.organism.name}-L{layer}"
     if not method_cfg.datasets.normalization.enabled:
         run_name += "-nonorm"
 
-    if method_cfg.training.encoder_init_norm != 1.0:    
+    if method_cfg.training.encoder_init_norm != 1.0:
         run_name += f"-ei{method_cfg.training.encoder_init_norm:.2e}"
 
-    if method_cfg.datasets.normalization.enabled and method_cfg.datasets.normalization.target_rms is not None:
+    if cfg.model.ignore_first_n_tokens_per_sample_during_training > 0:
+        run_name += f"-s{cfg.model.ignore_first_n_tokens_per_sample_during_training}"
+    if (
+        method_cfg.datasets.normalization.enabled
+        and method_cfg.datasets.normalization.target_rms is not None
+    ):
         run_name += f"-t{int(method_cfg.datasets.normalization.target_rms)}"
+
+    run_name += f"-k{k}-lr{lr:.0e}-x{expansion_factor}"
 
     run_name = run_name.replace(".", "p")
 
-    if len("science-of-finetuning/"+run_name) > 96:
-        run_name = run_name.replace(cfg.organism.name, "".join([word[0] for word in cfg.organism.name.split("_")]))
-        if len("science-of-finetuning/"+run_name) > 96:
+    if len("science-of-finetuning/" + run_name) > 96:
+        run_name = run_name.replace(
+            cfg.organism.name,
+            "".join([word[0] for word in cfg.organism.name.split("_")]),
+        )
+        if len("science-of-finetuning/" + run_name) > 96:
             raise ValueError(f"Run name too long: {run_name}")
 
     return run_name
@@ -581,9 +642,19 @@ def train_crosscoder_for_layer(
             cfg,
             layer_idx,
             normalizer_function=(
-                combine_normalizer
-                if cfg.diffing.method.datasets.normalization.enabled
-                else None
+                lambda x: (
+                    combine_normalizer(
+                        x,
+                        device=device,
+                        layer=layer_idx,
+                        n=cfg.model.ignore_first_n_tokens_per_sample_during_training,
+                    )
+                    if cfg.diffing.method.datasets.normalization.enabled
+                    else None
+                )
+            ),
+            dataset_processing_function=lambda x: skip_first_n_tokens(
+                x, cfg.model.ignore_first_n_tokens_per_sample_during_training
             ),
         )
     )
@@ -675,7 +746,10 @@ def train_crosscoder_for_layer(
         "run_name": trainer_config["wandb_name"],
         "hf_repo_id": hf_repo_id,
         "training_mode": "crosscoder",
-        "last_eval_logs": {k: v.item() if isinstance(v, torch.Tensor) else v for k, v in last_eval_logs.items()},
+        "last_eval_logs": {
+            k: v.item() if isinstance(v, torch.Tensor) else v
+            for k, v in last_eval_logs.items()
+        },
     }
 
     logger.info(f"Successfully trained crosscoder for layer {layer_idx}")
@@ -806,20 +880,27 @@ def train_sae_difference_for_layer(
             cfg,
             layer_idx,
             dataset_processing_function=lambda x: setup_sae_cache(
-                target=target, paired_cache=x
+                target=target,
+                paired_cache=x,
+                n=cfg.model.ignore_first_n_tokens_per_sample_during_training,
             ),
-            normalizer_function=(lambda x: (
-                recompute_diff_normalizer(
-                    x,
-                    target=target,
-                    subsample_size=cfg.diffing.method.datasets.normalization.subsample_size,
-                    batch_size=cfg.diffing.method.datasets.normalization.batch_size,
-                    cache_dir=cfg.diffing.method.datasets.normalization.cache_dir,
-                    layer=layer_idx,
-                )))
+            normalizer_function=(
+                (
+                    lambda x: (
+                        recompute_normalizer(
+                            x,
+                            subsample_size=cfg.diffing.method.datasets.normalization.subsample_size,
+                            batch_size=cfg.diffing.method.datasets.normalization.batch_size,
+                            cache_dir=cfg.diffing.method.datasets.normalization.cache_dir,
+                            layer=layer_idx,
+                            device=device,
+                            n=base_model_cfg.ignore_first_n_tokens_per_sample_during_training, # needed for cache key
+                        )
+                    )
+                )
                 if cfg.diffing.method.datasets.normalization.enabled
                 else None
-            ,
+            ),
         )
     )
 

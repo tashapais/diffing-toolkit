@@ -165,7 +165,7 @@ class PreprocessingPipeline(Pipeline):
             is_chat_data=dataset_cfg.is_chat,
             dataset_split=dataset_cfg.split,
             dataset_name=dataset_cfg.name,
-            ignore_first_n_tokens=model_cfg.ignore_first_n_tokens_per_sample,
+            ignore_first_n_tokens=model_cfg.ignore_first_n_tokens_per_sample_during_collection,
             token_level_replacement=model_cfg.token_level_replacement,
             default_text_column=model_cfg.text_column,
         )

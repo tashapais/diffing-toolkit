@@ -15,7 +15,8 @@ class ModelConfig:
     name: str
     model_id: str
     attn_implementation: str = "eager"
-    ignore_first_n_tokens_per_sample: int = 0
+    ignore_first_n_tokens_per_sample_during_collection: int = 0
+    ignore_first_n_tokens_per_sample_during_training: int = 0
     token_level_replacement: dict = None
     text_column: str = "text"
     base_model_id: str = None
@@ -43,8 +44,11 @@ def create_model_config(
         name=name_override or model_cfg.name,
         model_id=model_cfg.model_id,
         attn_implementation=model_cfg.get("attn_implementation"),
-        ignore_first_n_tokens_per_sample=model_cfg.get(
-            "ignore_first_n_tokens_per_sample", 0
+        ignore_first_n_tokens_per_sample_during_collection=model_cfg.get(
+            "ignore_first_n_tokens_per_sample_during_collection", 0
+        ),
+        ignore_first_n_tokens_per_sample_during_training=model_cfg.get(
+            "ignore_first_n_tokens_per_sample_during_training", 0
         ),
         token_level_replacement=model_cfg.get("token_level_replacement", None),
         text_column=model_cfg.get("text_column", "text"),
@@ -87,9 +91,13 @@ def get_model_configurations(cfg: DictConfig) -> Tuple[ModelConfig, ModelConfig]
         attn_implementation=finetuned_cfg.get(
             "attn_implementation", base_model_cfg.attn_implementation
         ),
-        ignore_first_n_tokens_per_sample=finetuned_cfg.get(
-            "ignore_first_n_tokens_per_sample",
-            base_model_cfg.ignore_first_n_tokens_per_sample,
+        ignore_first_n_tokens_per_sample_during_collection=finetuned_cfg.get(
+            "ignore_first_n_tokens_per_sample_during_collection",
+            base_model_cfg.ignore_first_n_tokens_per_sample_during_collection,
+        ),
+        ignore_first_n_tokens_per_sample_during_training=finetuned_cfg.get(
+            "ignore_first_n_tokens_per_sample_during_training",
+            base_model_cfg.ignore_first_n_tokens_per_sample_during_training,
         ),
         token_level_replacement=finetuned_cfg.get(
             "token_level_replacement", base_model_cfg.token_level_replacement
@@ -97,17 +105,6 @@ def get_model_configurations(cfg: DictConfig) -> Tuple[ModelConfig, ModelConfig]
         text_column=finetuned_cfg.get("text_column", base_model_cfg.text_column),
         dtype=finetuned_cfg.get("dtype", base_model_cfg.dtype),
     )
-
-    # Apply organism-specific overrides
-    organism_overrides = organism_cfg.get("preprocessing_overrides", {})
-    if organism_overrides and "ignore_first_n_tokens_per_sample" in organism_overrides:
-        finetuned_model_cfg.ignore_first_n_tokens_per_sample = organism_overrides[
-            "ignore_first_n_tokens_per_sample"
-        ]
-        # Also apply to base model for consistency in organism context
-        base_model_cfg.ignore_first_n_tokens_per_sample = organism_overrides[
-            "ignore_first_n_tokens_per_sample"
-        ]
 
     return base_model_cfg, finetuned_model_cfg
 
