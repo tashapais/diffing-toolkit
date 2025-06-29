@@ -383,7 +383,6 @@ class AsyncMaxActStoreWriter:
         finally:
             logger.info("Background writer process finished")
 
-
 class MaxActStore:
     """
     SQLite-based storage for maximum activating examples.
@@ -414,6 +413,8 @@ class MaxActStore:
         # Initialize database and handle config
         self._handle_config(max_examples, storage_format)
         self._init_database()
+
+        self._sequence_idx_cache = set()
     
     def _get_connection(self):
         """Get a connection to the database."""
@@ -552,6 +553,9 @@ class MaxActStore:
     def _insert_sequence(self, sequence_idx: int, token_ids: torch.Tensor, 
                         dataset_id: Optional[int] = None, dataset_name: Optional[str] = None) -> None:
         """Insert a single sequence into the database."""
+        if sequence_idx in self._sequence_idx_cache:
+            return
+        
         # Convert token IDs to binary blob
         binary_data = np.array(token_ids.cpu().tolist(), dtype=np.int32).tobytes()
         
@@ -569,6 +573,8 @@ class MaxActStore:
                 (sequence_idx, binary_data, text, len(token_ids), dataset_id, dataset_name)
             )
             conn.commit()
+        logger.info(f"Inserted sequence {sequence_idx} with {len(token_ids)} tokens")
+        self._sequence_idx_cache.add(sequence_idx)
     
     def _insert_sequences_bulk(self, all_sequences: List, dataset_info: Optional[List[Tuple[int, str]]] = None) -> None:
         """Bulk insert sequences into the database."""
@@ -643,6 +649,7 @@ class MaxActStore:
             # Insert examples one by one to get proper lastrowid behavior
             example_ids = []
             for data in bulk_data:
+                logger.info(f"Inserting example {data}")
                 cursor.execute(
                     "INSERT INTO examples (sequence_idx, score, latent_idx, quantile_idx, metadata) VALUES (?, ?, ?, ?, ?)",
                     data
@@ -720,28 +727,28 @@ class MaxActStore:
             batch_data: BatchData instance containing the examples to add
         """
         batch_size = len(batch_data.input_ids_batch)
-        
         for i in range(batch_size):
             score = float(batch_data.scores_per_example[i])
-            input_ids = torch.tensor(batch_data.input_ids_batch[i])
-            scores_per_token = torch.tensor(batch_data.scores_per_token_batch[i]) if batch_data.scores_per_token_batch and batch_data.scores_per_token_batch[i] is not None else None
-            additional_data = batch_data.additional_data_batch[i] if batch_data.additional_data_batch else None
-            
             # Get per-example latent_idx and quantile_idx
             latent_idx = batch_data.get_per_example_latent_idx(i, batch_size)
             quantile_idx = batch_data.get_per_example_quantile_idx(i, batch_size)
             
-            # Generate a unique sequence index
-            sequence_idx = hash(tuple(input_ids.tolist())) % (2**31)
+            input_ids = torch.tensor(batch_data.input_ids_batch[i])
+            scores_per_token = torch.tensor(batch_data.scores_per_token_batch[i]) if batch_data.scores_per_token_batch is not None and batch_data.scores_per_token_batch[i] is not None else None
+            additional_data = batch_data.additional_data_batch[i] if batch_data.additional_data_batch is not None else None
             
+            
+            # Generate a unique sequence index
+            sequence_idx = hash(tuple(input_ids.tolist()))
             # Insert sequence with dataset info
             self._insert_sequence(sequence_idx, input_ids, 
                                 dataset_name=batch_data.dataset_name,
                                 dataset_id=batch_data.dataset_id)
             
+            
             # Insert example
             example_ids = self._insert_example([(score, sequence_idx, latent_idx, quantile_idx, additional_data)])
-            
+            logger.info(f"Inserted example {example_ids[0]} with score {score} and latent_idx {latent_idx} and quantile_idx {quantile_idx}")
             # Insert activation details if provided
             if scores_per_token is not None:
                 if self.storage_format == 'sparse':
@@ -751,6 +758,10 @@ class MaxActStore:
                 elif self.storage_format == 'dense':
                     values = scores_per_token.numpy().astype(np.float32)
                     self._insert_activation_details([(example_ids[0], values)])
+
+        logger.info(f"Processed batch of {batch_size} examples")
+
+
 
     def _get_grouping_key(self, latent_idx: Optional[int], quantile_idx: Optional[int], 
                          dataset_name: Optional[str]) -> Optional[tuple]:
@@ -973,7 +984,8 @@ class MaxActStore:
             if self.storage_format == 'sparse':
                 positions = np.arange(len(scores_per_token), dtype=np.int32)
                 values = scores_per_token.float().cpu().numpy().astype(np.float32)
-                self._insert_activation_details([(example_ids[0], positions, values)])
+                mask = values != 0
+                self._insert_activation_details([(example_ids[0], positions[mask], values[mask])])
             elif self.storage_format == 'dense':
                 values = scores_per_token.cpu().numpy().astype(np.float32)
                 self._insert_activation_details([(example_ids[0], values)])
@@ -1444,7 +1456,7 @@ class MaxActStore:
                     existing_sequence_indices.add(source_seq_idx)
         
         # Insert sequences with new indices
-        with sqlite3.connect(self.db_path) as target_conn:
+        with self._get_connection() as target_conn:
             target_cursor = target_conn.cursor()
             target_cursor.execute("PRAGMA foreign_keys = ON")
             
@@ -1481,7 +1493,7 @@ class MaxActStore:
             example_data_to_insert.append((score, new_seq_idx, latent_idx, quantile_idx, json.loads(metadata) if metadata else None))
         
         # Insert examples in batches and collect their IDs
-        with sqlite3.connect(self.db_path) as target_conn:
+        with self._get_connection() as target_conn:
             target_cursor = target_conn.cursor()
             target_cursor.execute("PRAGMA foreign_keys = ON")
             
@@ -1643,6 +1655,16 @@ class MaxActStore:
                 }
         
         return groups
+
+    def get_num_sequences(self) -> int:
+        """Get number of sequences in the database."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT COUNT(*) FROM sequences")
+            return cursor.fetchone()[0]
+
+    
+         
 
 class ReadOnlyMaxActStore(MaxActStore):
     """
