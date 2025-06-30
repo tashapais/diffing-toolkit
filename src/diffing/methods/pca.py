@@ -615,8 +615,8 @@ class PCAMethod(DiffingMethod):
         from src.utils.visualization import multi_tab_interface
         multi_tab_interface(
             [
-                ("📊 Component Analysis", lambda: self._render_component_analysis_tab(selected_pca_info)),
-                ("🏆 Max Examples", lambda: self._render_max_examples_tab(selected_pca_info)),
+                ("🏆 Component Analysis", lambda: self._render_component_analysis_tab(selected_pca_info)),
+                ("📊 MaxAct Examples", lambda: self._render_max_examples_tab(selected_pca_info)),
                 ("🔥 Online Inference", lambda: PCAOnlineDashboard(self, selected_pca_info).display()),
                 ("🎨 Plots", lambda: self._render_plots_tab(selected_pca_info)),
             ],

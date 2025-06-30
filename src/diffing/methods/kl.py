@@ -550,7 +550,7 @@ class KLDivergenceDiffingMethod(DiffingMethod):
 
         multi_tab_interface(
             [
-                ("📊 Dataset Statistics", self._render_dataset_statistics),
+                ("📊 MaxAct Examples", self._render_dataset_statistics),
                 ("🔥 Interactive", lambda: KLDivergenceOnlineDashboard(self).display()),
             ],
             "KL Divergence Analysis",

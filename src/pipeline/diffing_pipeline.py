@@ -8,7 +8,7 @@ from loguru import logger
 
 from .pipeline import Pipeline
 from src.diffing.methods.kl import KLDivergenceDiffingMethod
-from src.diffing.methods.normdiff import NormDiffDiffingMethod
+from src.diffing.methods.activation_analysis import ActivationAnalysisDiffingMethod
 from src.diffing.methods.crosscoder import CrosscoderDiffingMethod
 from src.diffing.methods.sae_difference import SAEDifferenceMethod
 from src.diffing.methods.diffing_method import DiffingMethod
@@ -18,8 +18,8 @@ def get_method_class(method_name: str) -> DiffingMethod:
     """Get the appropriate method class for a given method name."""
     if method_name == "kl":
         return KLDivergenceDiffingMethod
-    elif method_name == "normdiff":
-        return NormDiffDiffingMethod
+    elif method_name == "activation_analysis":
+        return ActivationAnalysisDiffingMethod
     elif method_name == "crosscoder":
         return CrosscoderDiffingMethod
     elif method_name == "sae_difference":

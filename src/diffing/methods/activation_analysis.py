@@ -18,6 +18,7 @@ from transformers import AutoTokenizer
 import streamlit as st
 from nnsight import LanguageModel
 from matplotlib import pyplot as plt
+import copy
 
 from .diffing_method import DiffingMethod
 from src.utils.activations import get_layer_indices, load_activation_dataset_from_config, torch_quantile
@@ -25,6 +26,7 @@ from src.utils.configs import get_dataset_configurations, DatasetConfig
 from src.utils.cache import SampleCache
 from src.utils.max_act_store import MaxActStore, ReadOnlyMaxActStore
 from src.utils.dashboards import AbstractOnlineDiffingDashboard
+
 
 class SampleCacheDataset(Dataset):
     """
@@ -89,7 +91,86 @@ def collate_samples(batch: List[Tuple[torch.Tensor, torch.Tensor]]) -> List[Tupl
     return valid_samples
 
 
-class NormDiffDiffingMethod(DiffingMethod):
+def create_metric_selection_ui(key_prefix: str = "") -> Tuple[str, Optional[str]]:
+    """
+    Create a two-layer metric selection UI.
+    
+    Args:
+        key_prefix: Prefix for streamlit keys to avoid conflicts
+        
+    Returns:
+        Tuple of (metric_type, aggregation_method)
+        aggregation_method is None for metrics that don't support aggregation
+    """
+    import streamlit as st
+    
+    # First layer: metric type selection
+    metric_options = {
+        "norm_diff": "Norm Difference", 
+        "cos_dist": "Cosine Distance",
+        "norm_base": "Base Model Norm",
+        "norm_ft": "Finetuned Model Norm"
+    }
+    
+    metric_type = st.selectbox(
+        "Select Metric Type:",
+        options=list(metric_options.keys()),
+        format_func=lambda x: metric_options[x],
+        key=f"{key_prefix}_metric_type"
+    )
+    
+    # Second layer: aggregation selection (only for norm_diff and cos_dist)
+    aggregation = None
+    if metric_type in ["norm_diff", "cos_dist"]:
+        aggregation = st.selectbox(
+            "Select Aggregation:",
+            options=["max", "mean"],
+            format_func=lambda x: x.title(),
+            key=f"{key_prefix}_aggregation"
+        )
+    
+    return metric_type, aggregation
+
+
+def get_maxact_database_name(metric_type: str, aggregation: Optional[str] = None) -> str:
+    """
+    Map metric type and aggregation to database filename.
+    
+    Args:
+        metric_type: One of norm_diff, cos_dist, norm_base, norm_ft
+        aggregation: One of max, mean (only for norm_diff and cos_dist)
+        
+    Returns:
+        Database filename without .db extension
+    """
+    if metric_type == "norm_diff":
+        return "mean_norm_diff" if aggregation == "mean" else "norm_diff"
+    elif metric_type == "cos_dist":
+        return "mean_cos_dist" if aggregation == "mean" else "cos_dist"
+    elif metric_type == "norm_base":
+        return "norm_base" 
+    elif metric_type == "norm_ft":
+        return "norm_finetuned"
+    else:
+        raise ValueError(f"Unknown metric type: {metric_type}")
+
+
+def get_metric_display_name(metric_type: str, aggregation: Optional[str] = None) -> str:
+    """Get display name for metric combination."""
+    base_names = {
+        "norm_diff": "Norm Difference",
+        "cos_dist": "Cosine Distance", 
+        "norm_base": "Base Model Norm",
+        "norm_ft": "Finetuned Model Norm"
+    }
+    
+    base_name = base_names[metric_type]
+    if aggregation and metric_type in ["norm_diff", "cos_dist"]:
+        return f"{base_name} ({aggregation.title()})"
+    return base_name
+
+
+class ActivationAnalysisDiffingMethod(DiffingMethod):
     """
     Computes L2 norm difference per token between base and finetuned model activations.
     
@@ -116,7 +197,7 @@ class NormDiffDiffingMethod(DiffingMethod):
         self.layers = get_layer_indices(self.base_model_cfg.model_id, cfg.preprocessing.layers)
         
         # Setup results directory
-        self.results_dir = Path(cfg.diffing.results_dir) / "normdiff"
+        self.results_dir = Path(cfg.diffing.results_dir) / "activation_analysis"
         self.results_dir.mkdir(parents=True, exist_ok=True)
         
         # DataLoader configuration
@@ -155,19 +236,23 @@ class NormDiffDiffingMethod(DiffingMethod):
         self.logger.info(f"Loaded sample cache: {dataset_cfg.id}, layer {layer} ({len(sample_cache)} samples)")
         return sample_cache, self.tokenizer
         
-    def compute_norm_difference_and_statistics(
+    def compute_activation_statistics(
         self, 
-        activations: torch.Tensor
-    ) -> torch.Tensor:
+        activations: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """
-        Compute per-token L2 norm difference, cosine similarity, and other statistics between base and finetuned activations.
+        Compute per-token L2 norm difference, cosine similarity, and individual norms between base and finetuned activations.
         
         Args:
             activations: Stacked activations [seq_len, 2, activation_dim]
                         where index 0 is base, index 1 is finetuned
             
         Returns:
-            norm_diffs: L2 norm differences per token [seq_len]
+            Tuple containing:
+                - norm_diffs: L2 norm of activation differences [seq_len]
+                - cos_sim: Cosine similarity between activations [seq_len]
+                - norm_base: L2 norm of base activations [seq_len]
+                - norm_finetuned: L2 norm of finetuned activations [seq_len]
         """
         seq_len, num_models, activation_dim = activations.shape
         # Shape assertions
@@ -198,7 +283,7 @@ class NormDiffDiffingMethod(DiffingMethod):
         assert norm_finetuned.shape == (seq_len,), f"Expected: {(seq_len,)}, got: {norm_finetuned.shape}"
 
         
-        return norm_diffs.cpu(), cos_sim.cpu(), norm_base.cpu(), norm_finetuned.cpu()
+        return norm_diffs.cpu().float(), cos_sim.cpu().float(), norm_base.cpu().float(), norm_finetuned.cpu().float()
     
     def compute_statistics(self, all_norm_values: torch.Tensor) -> Dict[str, float]:
         """
@@ -355,14 +440,14 @@ class NormDiffDiffingMethod(DiffingMethod):
         self.compute_histogram(relative_diff_values, "Relative Activation Difference Norm", plot_dir)
         self.compute_histogram(relative_diff_values, "Relative Activation Difference Norm", plot_dir, no_outliers=True)
 
-    def process_layer(self, dataset_cfg: DatasetConfig, layer: int, max_act_store: MaxActStore) -> Dict[str, Any]:
+    def process_layer(self, dataset_cfg: DatasetConfig, layer: int, max_act_stores: Dict[str, MaxActStore]) -> Dict[str, Any]:
         """
         Process a single layer for a dataset and compute norm differences.
         
         Args:
             dataset_cfg: Dataset configuration
             layer: Layer index
-            
+            max_act_stores: Dictionary of MaxActStore instances for each type
         Returns:
             Dictionary containing statistics and max examples for this dataset/layer
         """
@@ -398,36 +483,140 @@ class NormDiffDiffingMethod(DiffingMethod):
         all_norm_base_values = []
         all_norm_finetuned_values = []
         processed_samples = 0
+
+        BASE_DICT = {
+            "scores_per_example": [],
+            "input_ids_batch": [],
+            "scores_per_token_batch": [],
+            "dataset_name": dataset_cfg.name,
+        }
         
-        # Process samples in batches using DataLoader
-        for batch in tqdm(dataloader, desc=f"Processing batches for layer {layer}"):
-            # Process each sample in the batch
-            for tokens, activations in batch:
-                # Move activations to GPU for computation
-                activations = activations.to(self.device)
+        # Use async writers with context managers for efficient background writing
+        with max_act_stores['norm_diff'].create_async_writer(
+            buffer_size=self.batch_size * 10,  # Buffer ~10 batches
+            flush_interval=30.0,
+            auto_maintain_top_k=True
+        ) as norm_diff_writer, \
+        max_act_stores['mean_norm_diff'].create_async_writer(
+            buffer_size=self.batch_size * 10,
+            flush_interval=30.0,
+            auto_maintain_top_k=True
+        ) as mean_norm_diff_writer, \
+        max_act_stores['cos_dist'].create_async_writer(
+            buffer_size=self.batch_size * 10,
+            flush_interval=30.0,
+            auto_maintain_top_k=True
+        ) as cos_dist_writer, \
+        max_act_stores['mean_cos_dist'].create_async_writer(
+            buffer_size=self.batch_size * 10,
+            flush_interval=30.0,
+            auto_maintain_top_k=True
+        ) as mean_cos_dist_writer, \
+        max_act_stores['norm_base'].create_async_writer(
+            buffer_size=self.batch_size * 10,
+            flush_interval=30.0,
+            auto_maintain_top_k=True
+        ) as norm_base_writer, \
+        max_act_stores['norm_finetuned'].create_async_writer(
+            buffer_size=self.batch_size * 10,
+            flush_interval=30.0,
+            auto_maintain_top_k=True
+        ) as norm_finetuned_writer:
+            
+            # Process samples in batches using DataLoader
+            for batch in tqdm(dataloader, desc=f"Processing batches for layer {layer}"):
+                norm_base_values = copy.deepcopy(BASE_DICT)
+                norm_finetuned_values = copy.deepcopy(BASE_DICT)
+                cos_dist_values = copy.deepcopy(BASE_DICT)
+                norm_diffs_values = copy.deepcopy(BASE_DICT)
+                mean_norm_diffs_values = copy.deepcopy(BASE_DICT)
+                mean_cos_dist_values = copy.deepcopy(BASE_DICT)
+
+                # Process each sample in the batch
+                for tokens, activations in batch:
+                    # Move activations to GPU for computation
+                    activations = activations.to(self.device)
+                    
+                    # Compute norm differences
+                    norm_diffs, cos_sim, norm_base, norm_finetuned = self.compute_activation_statistics(activations)
+                    
+                    # Convert cosine similarity to cosine distance
+                    cos_dist = 1 - cos_sim
+
+                    if self.method_cfg.method_params.skip_first_n_tokens:
+                        n = self.cfg.model.ignore_first_n_tokens_per_sample_during_training
+                        max_norm_value = torch.max(norm_diffs[n:]).item()
+                        mean_norm_value = torch.mean(norm_diffs[n:]).item()
+                        max_cos_dist_value = torch.max(cos_dist[n:]).item()
+                        mean_cos_dist_value = torch.mean(cos_dist[n:]).item()
+                        max_base_value = torch.max(norm_base[n:]).item()
+                        max_finetuned_value = torch.max(norm_finetuned[n:]).item()
+                        norm_diffs[:n] = 0
+                        cos_dist[:n] = 0
+                        norm_base[:n] = 0
+                        norm_finetuned[:n] = 0
+                    else:
+                        max_norm_value = torch.max(norm_diffs).item()
+                        mean_norm_value = torch.mean(norm_diffs).item()
+                        max_cos_dist_value = torch.max(cos_dist).item()
+                        mean_cos_dist_value = torch.mean(cos_dist).item()
+                        max_base_value = torch.max(norm_base).item()
+                        max_finetuned_value = torch.max(norm_finetuned).item()
+                    # Add to batch dictionaries
+                    norm_base_values['scores_per_example'].append(max_base_value)
+                    norm_base_values['input_ids_batch'].append(tokens)
+                    norm_base_values['scores_per_token_batch'].append(norm_base)
+
+                    norm_finetuned_values['scores_per_example'].append(max_finetuned_value)
+                    norm_finetuned_values['input_ids_batch'].append(tokens)
+                    norm_finetuned_values['scores_per_token_batch'].append(norm_finetuned)
+
+                    cos_dist_values['scores_per_example'].append(max_cos_dist_value)
+                    cos_dist_values['input_ids_batch'].append(tokens)
+                    cos_dist_values['scores_per_token_batch'].append(cos_dist)
+
+                    norm_diffs_values['scores_per_example'].append(max_norm_value)
+                    norm_diffs_values['input_ids_batch'].append(tokens)
+                    norm_diffs_values['scores_per_token_batch'].append(norm_diffs)
+
+                    mean_norm_diffs_values['scores_per_example'].append(mean_norm_value)
+                    mean_norm_diffs_values['input_ids_batch'].append(tokens)
+                    mean_norm_diffs_values['scores_per_token_batch'].append(norm_diffs)
+
+                    mean_cos_dist_values['scores_per_example'].append(mean_cos_dist_value)
+                    mean_cos_dist_values['input_ids_batch'].append(tokens)
+                    mean_cos_dist_values['scores_per_token_batch'].append(cos_dist)
+
+                    # Collect all norm values for statistics
+                    all_norm_values.append(norm_diffs)
+                    all_cos_sim_values.append(cos_sim)
+                    all_norm_base_values.append(norm_base)
+                    all_norm_finetuned_values.append(norm_finetuned)
+                    processed_samples += 1
                 
-                # Compute norm differences
-                norm_diffs, cos_sim, norm_base, norm_finetuned = self.compute_norm_difference_and_statistics(activations)
+    
+
+                # Convert to tensors for batch writing
+                norm_base_values['scores_per_example'] = torch.tensor(norm_base_values['scores_per_example'])
+                norm_finetuned_values['scores_per_example'] = torch.tensor(norm_finetuned_values['scores_per_example'])
+                norm_diffs_values['scores_per_example'] = torch.tensor(norm_diffs_values['scores_per_example'])
+                mean_norm_diffs_values['scores_per_example'] = torch.tensor(mean_norm_diffs_values['scores_per_example'])
+                cos_dist_values['scores_per_example'] = torch.tensor(cos_dist_values['scores_per_example'])
+                mean_cos_dist_values['scores_per_example'] = torch.tensor(mean_cos_dist_values['scores_per_example'])
+
+                # Convert to tensors for batch writing
+                norm_base_writer.add_batch_examples(**norm_base_values)
                 
-                # Find max norm difference in this sample
-                max_norm_value = torch.max(norm_diffs).item()
+                norm_finetuned_writer.add_batch_examples(**norm_finetuned_values)
                 
-                # Add to maximum examples store
-                max_act_store.add_example(
-                    score=max_norm_value,
-                    input_ids=tokens,
-                    scores_per_token=norm_diffs,
-                    additional_data={'layer': layer},
-                    dataset_name=dataset_cfg.name,
-                )
+                norm_diff_writer.add_batch_examples(**norm_diffs_values)
                 
-                # Collect all norm values for statistics
-                all_norm_values.append(norm_diffs)
-                all_cos_sim_values.append(cos_sim)
-                all_norm_base_values.append(norm_base)
-                all_norm_finetuned_values.append(norm_finetuned)
-                processed_samples += 1
-        
+                mean_norm_diff_writer.add_batch_examples(**mean_norm_diffs_values)
+                
+                cos_dist_writer.add_batch_examples(**cos_dist_values)
+                
+                mean_cos_dist_writer.add_batch_examples(**mean_cos_dist_values)
+
         # Concatenate all norm values
         if all_norm_values:
             all_norm_tensor = torch.cat(all_norm_values, dim=0).float()
@@ -458,7 +647,7 @@ class NormDiffDiffingMethod(DiffingMethod):
             }
         }
     
-    def process_dataset(self, dataset_cfg: DatasetConfig, max_act_stores: Dict[int, MaxActStore]) -> Dict[str, Any]:
+    def process_dataset(self, dataset_cfg: DatasetConfig, max_act_stores: Dict[int, Dict[str, MaxActStore]]) -> Dict[str, Any]:
         """
         Process all layers for a single dataset.
         
@@ -525,14 +714,39 @@ class NormDiffDiffingMethod(DiffingMethod):
         Processes each dataset and layer combination, saves results to disk.
         """
         self.logger.info("Starting norm difference computation across datasets and layers...")
+
+        # Test if the results directory exists
+        run = False
+        if self.results_dir.exists() and not self.method_cfg.overwrite:
+            for layer in self.layers:
+                for store_type in ['norm_diff', 'mean_norm_diff', 'cos_dist', 'mean_cos_dist', 'norm_base', 'norm_finetuned']:
+                    path = self.results_dir / f"layer_{layer}" / f"{store_type}.db"
+                    if path.exists():
+                        self.logger.info(f"Found {path}")
+                    else:
+                        run = True
+            if not run:
+                self.logger.info(f"Results already exists. Set diffing.method.activation_analysis.overwrite=true to overwrite.")
+                return
+
+        if self.method_cfg.overwrite:
+            for layer in self.layers:
+                for store_type in ['norm_diff', 'mean_norm_diff', 'cos_dist', 'mean_cos_dist', 'norm_base', 'norm_finetuned']:
+                    path = self.results_dir / f"layer_{layer}" / f"{store_type}.db"
+                    if path.exists():
+                        self.logger.info(f"Removing {path}")
+                        path.unlink()
+        
         max_act_stores = {}
         for layer in self.layers:
-            max_act_stores[layer] = MaxActStore(
-                self.results_dir / f"layer_{layer}" / "examples.db",
-                tokenizer=self.tokenizer,
-                per_dataset=True,
-                max_examples=self.method_cfg.analysis.max_activating_examples.num_examples
-            )
+            max_act_stores[layer] = {}
+            for store_type in ['norm_diff', 'mean_norm_diff', 'cos_dist', 'mean_cos_dist', 'norm_base', 'norm_finetuned']:
+                max_act_stores[layer][store_type] = MaxActStore(
+                    self.results_dir / f"layer_{layer}" / f"{store_type}.db",
+                    tokenizer=self.tokenizer,
+                    per_dataset=True,
+                    max_examples=self.method_cfg.analysis.max_activating_examples.num_examples
+                )
         # Process each dataset
         for dataset_cfg in self.datasets:
             
@@ -540,7 +754,7 @@ class NormDiffDiffingMethod(DiffingMethod):
             results = self.process_dataset(dataset_cfg, max_act_stores)
             
             # Save results to disk
-            output_file = self.save_results(dataset_cfg.id, results)
+            self.save_results(dataset_cfg.id, results)
 
         
         self.logger.info("Norm difference computation completed successfully")
@@ -558,11 +772,11 @@ class NormDiffDiffingMethod(DiffingMethod):
 
         multi_tab_interface(
             [
-                ("📊 Dataset Statistics", self._render_dataset_statistics),
-                ("🔥 Interactive", lambda: NormDiffOnlineDashboard(self).display()),
+                ("📊 MaxAct Examples", self._render_dataset_statistics),
+                ("🔥 Interactive", lambda: ActivationAnalysisOnlineDashboard(self).display()),
                 ("🎨 Plots", lambda: self._render_plots_tab()),
             ],
-            "Norm Difference Analysis",
+            "Activation Analysis",
         )
     
     
@@ -695,7 +909,7 @@ class NormDiffDiffingMethod(DiffingMethod):
             st.error(f"No layer directories found in {self.results_dir}")
             return
         
-        # Extract layer numbers from directory names and check for examples.db
+        # Extract layer numbers from directory names and check for database files
         available_layers = []
         for layer_dir in layer_dirs:
             if not layer_dir.is_dir():
@@ -705,26 +919,82 @@ class NormDiffDiffingMethod(DiffingMethod):
             dirname = layer_dir.name
             layer_part = dirname[6:]  # Remove "layer_" prefix
             layer_num = int(layer_part)
-            # Check if examples.db exists in this layer directory
-            examples_db_path = layer_dir / "examples.db"
-            if examples_db_path.exists():
+            
+            # Check if any database files exist in this layer directory
+            db_files = list(layer_dir.glob("*.db"))
+            if db_files:
                 available_layers.append(layer_num)
+
+        if not available_layers:
+            st.error("No database files found in any layer directories")
+            return
 
         selected_layer = st.selectbox("Select Layer", available_layers, key="layer_selector_maxact_normdiff_dataset_statistics")
         
-        if not selected_layer:
+        if selected_layer is None:
             return
         
         layer_dir = self.results_dir / f"layer_{selected_layer}"
-
-        # Load the MaxActStore for this dataset and layer
-        max_store_path = layer_dir / "examples.db"
         
-        if not max_store_path.exists():
-            st.error(f"Example database not found: {max_store_path}")
+        # Find available metric databases for this layer
+        available_metrics = {}
+        metric_types = ["norm_diff", "cos_dist", "norm_base", "norm_ft"]
+        
+        for metric_type in metric_types:
+            if metric_type in ["norm_diff", "cos_dist"]:
+                # Check for both mean and max versions
+                for agg in ["mean", "max"]:
+                    db_name = get_maxact_database_name(metric_type, agg)
+                    db_path = layer_dir / f"{db_name}.db"
+                    if db_path.exists():
+                        key = f"{metric_type}_{agg}"
+                        available_metrics[key] = {
+                            "metric_type": metric_type,
+                            "aggregation": agg,
+                            "path": db_path,
+                            "display_name": get_metric_display_name(metric_type, agg)
+                        }
+            else:
+                # Check for single version (no aggregation)
+                db_name = get_maxact_database_name(metric_type)
+                db_path = layer_dir / f"{db_name}.db"
+                if db_path.exists():
+                    available_metrics[metric_type] = {
+                        "metric_type": metric_type,
+                        "aggregation": None,
+                        "path": db_path,
+                        "display_name": get_metric_display_name(metric_type)
+                    }
+        
+        if not available_metrics:
+            st.error(f"No metric databases found for layer {selected_layer}")
             return
-
-        # Create MaxActStore instance (read existing storage format from config)
+        
+        # Create metric selection UI and render display in fragment
+        metric_type, aggregation = create_metric_selection_ui("dataset_stats")
+        
+        # Find the matching metric configuration
+        if metric_type in ["norm_diff", "cos_dist"] and aggregation:
+            metric_key = f"{metric_type}_{aggregation}"
+        else:
+            metric_key = metric_type
+            
+        if metric_key not in available_metrics:
+            st.error(f"Database not found for {get_metric_display_name(metric_type, aggregation)}")
+            st.write("Available metrics:", list(available_metrics.keys()))
+            return
+        
+        self._render_metric_display_fragment(available_metrics[metric_key], selected_layer)
+    
+    @st.fragment
+    def _render_metric_display_fragment(self, metric_config: Dict[str, Any], layer: int):
+        """Fragment for rendering metric display without recomputation."""
+        from src.utils.dashboards import MaxActivationDashboardComponent
+        
+        # Load the MaxActStore for the selected metric
+        max_store_path = metric_config["path"]
+        
+        # Create MaxActStore instance
         assert self.tokenizer is not None, "Tokenizer must be available for MaxActStore visualization"
         max_store = ReadOnlyMaxActStore(
             max_store_path, 
@@ -732,9 +1002,10 @@ class NormDiffDiffingMethod(DiffingMethod):
         )
 
         # Create and display the dashboard component
+        title = f"{metric_config['display_name']} Examples - Layer {layer}"
         component = MaxActivationDashboardComponent(
             max_store, 
-            title=f"Norm Difference Examples - Layer {selected_layer}"
+            title=title
         )
         component.display()
     
@@ -764,15 +1035,16 @@ class NormDiffDiffingMethod(DiffingMethod):
                     continue
                     
                 organism_name = organism_dir.name
-                normdiff_dir = organism_dir / "normdiff"
+                normdiff_dir = organism_dir / "activation_analysis"
                 
                 # Check if normdiff results exist (any dataset dirs with results.json)
                 if normdiff_dir.exists():
                     has_results = False
                     for layer_dir in normdiff_dir.iterdir():
                         if layer_dir.is_dir():
-                            results_file = layer_dir / "examples.db"
-                            if results_file.exists():
+                            # Check for any examples database files
+                            examples_files = list(layer_dir.glob("*.db"))
+                            if examples_files:
                                 has_results = True
                                 break
                     
@@ -783,11 +1055,11 @@ class NormDiffDiffingMethod(DiffingMethod):
         
         return results
 
-    def compute_normdiff_for_tokens(
+    def compute_all_activation_statistics_for_tokens(
         self, input_ids: torch.Tensor, attention_mask: torch.Tensor, layer: int
     ) -> Dict[str, Any]:
         """
-        Compute norm difference statistics for given tokens (used by both method and dashboard).
+        Compute all activation statistics for given tokens (used by online dashboard).
         
         Args:
             input_ids: Token IDs tensor [batch_size, seq_len]
@@ -795,9 +1067,8 @@ class NormDiffDiffingMethod(DiffingMethod):
             layer: Layer index to analyze
             
         Returns:
-            Dictionary with tokens, norm_diff_values, and statistics
+            Dictionary with tokens and all computed statistics for different metrics
         """
-   
         # Get base model as LanguageModel
         base_nn_model = LanguageModel(self.base_model, tokenizer=self.tokenizer)
         
@@ -841,69 +1112,135 @@ class NormDiffDiffingMethod(DiffingMethod):
         # Shape assertions
         assert stacked_activations.shape == (seq_len, 2, hidden_dim), f"Expected: {(seq_len, 2, hidden_dim)}, got: {stacked_activations.shape}"
         
-        # Compute norm differences using existing method
-        norm_diff_values = self.compute_norm_difference(stacked_activations)
+        # Compute all statistics using existing method
+        norm_diff_values, cos_sim_values, norm_base_values, norm_finetuned_values = self.compute_activation_statistics(stacked_activations)
         
-        # Convert to numpy for statistics computation
+        # Convert all to numpy for statistics computation
         norm_diff_np = norm_diff_values.float().cpu().numpy()
+        cos_sim_np = cos_sim_values.float().cpu().numpy()
+        norm_base_np = norm_base_values.float().cpu().numpy()
+        norm_finetuned_np = norm_finetuned_values.float().cpu().numpy()
         
-        # Compute statistics
-        statistics = {
-            'mean': float(np.mean(norm_diff_np)),
-            'std': float(np.std(norm_diff_np)),
-            'min': float(np.min(norm_diff_np)),
-            'max': float(np.max(norm_diff_np)),
-            'median': float(np.median(norm_diff_np)),
-        }
+        cos_dist_np = 1 - cos_sim_np
+        def compute_stats(values):
+            return {
+                'mean': float(np.mean(values)),
+                'std': float(np.std(values)),
+                'min': float(np.min(values)),
+                'max': float(np.max(values)),
+                'median': float(np.median(values)),
+            }
         
+        # Return comprehensive results for all metrics
         return {
             'tokens': tokens,
-            'norm_diff_values': norm_diff_np,
-            'statistics': statistics,
+            'layer': layer,
             'total_tokens': len(tokens),
-            'layer': layer
+            'metrics': {
+                'norm_diff': {
+                    'values': norm_diff_np,
+                    'max_values': norm_diff_np,  # For max aggregation
+                    'mean_values': np.full_like(norm_diff_np, np.mean(norm_diff_np)),  # For mean aggregation
+                    'statistics': compute_stats(norm_diff_np)
+                },
+                'cos_dist': {
+                    'values': cos_dist_np,
+                    'max_values': cos_dist_np,  # For max aggregation  
+                    'mean_values': np.full_like(cos_dist_np, np.mean(cos_dist_np)),  # For mean aggregation
+                    'statistics': compute_stats(cos_dist_np)
+                },
+                'norm_base': {
+                    'values': norm_base_np,
+                    'statistics': compute_stats(norm_base_np)
+                },
+                'norm_ft': {
+                    'values': norm_finetuned_np,
+                    'statistics': compute_stats(norm_finetuned_np)
+                }
+            }
         }
 
 
-class NormDiffOnlineDashboard(AbstractOnlineDiffingDashboard):
+class ActivationAnalysisOnlineDashboard(AbstractOnlineDiffingDashboard):
     """
-    Online dashboard for interactive norm difference analysis.
+    Online dashboard for interactive activation analysis with metric selection.
     """
     
     def _render_streamlit_method_controls(self) -> Dict[str, Any]:
-        """Render NormDiff-specific controls in Streamlit."""
+        """Render ActivationAnalysis-specific controls in Streamlit."""
         import streamlit as st
         
         layer = st.selectbox(
             "Select Layer:",
             options=self.method.layers,
-            help="Choose which layer to analyze"
+            help="Choose which layer to analyze",
+            key="online_layer_selector"
         )
         return {"layer": layer}
     
     def compute_statistics_for_tokens(self, input_ids: torch.Tensor, attention_mask: torch.Tensor, **kwargs) -> Dict[str, Any]:
-        """Compute norm difference statistics using the parent method's computation function."""
+        """Compute all activation statistics and show metric selection interface."""
+        import streamlit as st
+        
         layer = kwargs.get("layer", self.method.layers[0])
-        results = self.method.compute_normdiff_for_tokens(input_ids, attention_mask, layer)
+        
+        # Show computation progress
+        with st.spinner("Computing activation statistics..."):
+            all_results = self.method.compute_all_activation_statistics_for_tokens(input_ids, attention_mask, layer)
+        
+        # Show metric selection UI after computation
+        st.success("✅ Computation complete! Select which metric to display:")
+        
+        # Use fragment for instant metric switching
+        return self._render_metric_selection_fragment(all_results)
+    
+    @st.fragment
+    def _render_metric_selection_fragment(self, all_results: Dict[str, Any]) -> Dict[str, Any]:
+        """Fragment for selecting and displaying metrics without recomputation."""
+        import streamlit as st
+        
+        # Create metric selection UI
+        metric_type, aggregation = create_metric_selection_ui("online_dashboard")
+        
+        # Get the selected metric data
+        metric_data = all_results['metrics'][metric_type]
+        
+        # For norm_diff and cos_dist, use aggregation selection
+        if metric_type in ["norm_diff", "cos_dist"] and aggregation:
+            if aggregation == "mean":
+                values = metric_data['mean_values']
+                display_name = get_metric_display_name(metric_type, aggregation)
+            else:  # max
+                values = metric_data['max_values'] 
+                display_name = get_metric_display_name(metric_type, aggregation)
+        else:
+            values = metric_data['values']
+            display_name = get_metric_display_name(metric_type)
+        
+        # Show selected metric info
+        st.info(f"Displaying: **{display_name}**")
         
         # Adapt the results format for the abstract dashboard
         return {
-            'tokens': results['tokens'],
-            'values': results['norm_diff_values'],  # Use 'values' as the standard key
-            'statistics': results['statistics'],
-            'total_tokens': results['total_tokens']
+            'tokens': all_results['tokens'],
+            'values': values,
+            'statistics': metric_data['statistics'],
+            'total_tokens': all_results['total_tokens'],
+            'metric_type': metric_type,
+            'aggregation': aggregation,
+            'display_name': display_name
         }
     
     def get_method_specific_params(self) -> Dict[str, Any]:
-        """Get NormDiff-specific parameters."""
-        if hasattr(self, 'layer_selector'):
-            return {"layer": self.layer_selector.value}
-        return {"layer": self.method.layers[0]}
+        """Get activation analysis specific parameters."""
+        # Return empty dict since we handle parameters differently now
+        return {}
     
     def _get_color_rgb(self) -> tuple:
-        """Get red color for norm difference highlighting."""
-        return (255, 0, 0)
+        """Get color for highlighting based on current metric."""
+        # You could make this dynamic based on metric type
+        return (255, 0, 0)  # Red for now
     
     def _get_title(self) -> str:
-        """Get title for norm difference analysis."""
-        return "Norm Difference Analysis"
+        """Get title for activation analysis."""
+        return "Activation Analysis Dashboard"

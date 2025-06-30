@@ -1441,7 +1441,7 @@ class AsyncMaxActStoreWriter:
             logger.info("Stopped async writer process")
 
     def add_batch_examples(self, scores_per_example: torch.Tensor,
-                          input_ids_batch: torch.Tensor,
+                          input_ids_batch: torch.Tensor|List[torch.Tensor],
                           attention_mask_batch: Optional[torch.Tensor] = None,
                           scores_per_token_batch: Optional[torch.Tensor] = None,
                           additional_data_batch: Optional[List[dict]] = None,
@@ -1472,7 +1472,6 @@ class AsyncMaxActStoreWriter:
         self._check_for_errors()
         
         batch_size = len(scores_per_example)
-        
         # Process tensors using centralized logic
         processed_input_ids, processed_scores_per_token = process_batch_tensors(
             input_ids_batch, attention_mask_batch, scores_per_token_batch

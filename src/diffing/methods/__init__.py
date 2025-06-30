@@ -3,11 +3,11 @@ Diffing methods for comparing models.
 """
 
 from .kl import KLDivergenceDiffingMethod
-from .normdiff import NormDiffDiffingMethod
+from .activation_analysis import ActivationAnalysisDiffingMethod
 from .crosscoder import CrosscoderDiffingMethod
 from .sae_difference import SAEDifferenceMethod
 
-__all__ = ['KLDivergenceDiffingMethod', 'NormDiffDiffingMethod', 'CrosscoderDiffingMethod', 'SAEDifferenceMethod']
+__all__ = ['KLDivergenceDiffingMethod', 'ActivationAnalysisDiffingMethod', 'CrosscoderDiffingMethod', 'SAEDifferenceMethod']
 
 
 
