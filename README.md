@@ -1,5 +1,5 @@
-# Diffing Game: Model Comparison and Analysis Framework
-
+# Diffing Toolkit: Model Comparison and Analysis Framework
+[Work-In-Progress]
 A research framework for analyzing differences between language models using interpretability techniques. This project enables systematic comparison of base models and their variants (model organisms) through various diffing methodologies.
 
 ## Overview
