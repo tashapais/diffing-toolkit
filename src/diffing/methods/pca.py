@@ -329,71 +329,71 @@ class PCAMethod(DiffingMethod):
         )
 
         latent_idx = torch.arange(pca.n_components)
-        # # Use async writers with context managers for efficient background writing
-        # with max_store_positive.create_async_writer(
-        #     buffer_size=pca.n_components * 10,  # Buffer ~10 batches
-        #     flush_interval=30.0,
-        #     auto_maintain_top_k=True
-        # ) as positive_writer, \
-        # max_store_negative.create_async_writer(
-        #     buffer_size=pca.n_components * 10,
-        #     flush_interval=30.0,
-        #     auto_maintain_top_k=True
-        # ) as negative_writer:
-        
-        # Process each dataset to find maximum activating examples
-        for dataset_idx, (dataset_name, dataset_caches) in enumerate(caches.items()):
-            logger.info(f"Processing maximum examples for dataset: {dataset_name}")
+        # Use async writers with context managers for efficient background writing
+        with max_store_positive.create_async_writer(
+            buffer_size=pca.n_components * 10,  # Buffer ~10 batches
+            flush_interval=30.0,
+            auto_maintain_top_k=True
+        ) as positive_writer, \
+        max_store_negative.create_async_writer(
+            buffer_size=pca.n_components * 10,
+            flush_interval=30.0,
+            auto_maintain_top_k=True
+        ) as negative_writer:
             
-            paired_cache = dataset_caches[layer_idx]
-
-            # Create processed cache for the target
-            processed_cache = setup_sae_cache(target=self.method_cfg.training.target, paired_cache=paired_cache)
-            
-            # Create SampleCache to get sequences with tokens
-            sample_cache = SampleCache(processed_cache, bos_token_id=self.tokenizer.bos_token_id)
-
-            cache = Subset(sample_cache, indices=range(min(len(sample_cache), self.method_cfg.analysis.max_activating_examples.max_num_samples)))
-            dataloader = DataLoader(cache, batch_size=1, shuffle=False, num_workers=4, pin_memory=False)
-            
-            for batch_idx, batch in tqdm(enumerate(dataloader), total=len(dataloader), desc=f"Processing dataset {dataset_name}"):
-                # Load sample
-                tokens, activations = batch
-                activations = activations[0].to(self.device)
-                tokens = tokens[0]
-                assert tokens.ndim == 1, f"Expected 1D tokens, got shape {tokens.shape}"
+            # Process each dataset to find maximum activating examples
+            for dataset_idx, (dataset_name, dataset_caches) in enumerate(caches.items()):
+                logger.info(f"Processing maximum examples for dataset: {dataset_name}")
                 
-                # PCA transform
-                projections = pca.transform(activations)  # [seq_len, n_components]
-                assert projections.ndim == 2, f"Expected 2D projections, got shape {projections.shape}"
-                assert projections.shape == (len(tokens), pca.n_components)
+                paired_cache = dataset_caches[layer_idx]
 
-                # Compute max/min scores
-                max_positive_score_per_component = torch.max(projections, dim=0)[0]
-                max_negative_score_per_component = torch.min(projections, dim=0)[0]
-                input_ids_batch = torch.tensor(tokens).repeat(pca.n_components, 1) # [n_components, seq_len]
-                assert input_ids_batch.shape == (pca.n_components, len(tokens))
+                # Create processed cache for the target
+                processed_cache = setup_sae_cache(target=self.method_cfg.training.target, paired_cache=paired_cache)
+                
+                # Create SampleCache to get sequences with tokens
+                sample_cache = SampleCache(processed_cache, bos_token_id=self.tokenizer.bos_token_id)
 
-                projections_T = projections.T
-                assert projections_T.shape == (pca.n_components, len(tokens))
+                cache = Subset(sample_cache, indices=range(min(len(sample_cache), self.method_cfg.analysis.max_activating_examples.max_num_samples)))
+                dataloader = DataLoader(cache, batch_size=1, shuffle=False, num_workers=4, pin_memory=False)
+                
+                for batch_idx, batch in tqdm(enumerate(dataloader), total=len(dataloader), desc=f"Processing dataset {dataset_name}"):
+                    # Load sample
+                    tokens, activations = batch
+                    activations = activations[0].to(self.device)
+                    tokens = tokens[0]
+                    assert tokens.ndim == 1, f"Expected 1D tokens, got shape {tokens.shape}"
+                    
+                    # PCA transform
+                    projections = pca.transform(activations)  # [seq_len, n_components]
+                    assert projections.ndim == 2, f"Expected 2D projections, got shape {projections.shape}"
+                    assert projections.shape == (len(tokens), pca.n_components)
 
-                # Write to stores 
-                # For future information: Writing is the bottleneck here. 
-                max_store_positive.add_batch_examples(
-                    scores_per_example=max_positive_score_per_component,
-                    input_ids_batch=input_ids_batch,
-                    scores_per_token_batch=projections_T,
-                    latent_idx=latent_idx,
-                    dataset_name=dataset_name,
-                )
+                    # Compute max/min scores
+                    max_positive_score_per_component = torch.max(projections, dim=0)[0]
+                    max_negative_score_per_component = torch.min(projections, dim=0)[0]
+                    input_ids_batch = torch.tensor(tokens).repeat(pca.n_components, 1) # [n_components, seq_len]
+                    assert input_ids_batch.shape == (pca.n_components, len(tokens))
 
-                max_store_negative.add_batch_examples(
-                    scores_per_example=max_negative_score_per_component,
-                    input_ids_batch=input_ids_batch,
-                    scores_per_token_batch=projections_T,
-                    latent_idx=latent_idx,
-                    dataset_name=dataset_name,
-                )
+                    projections_T = projections.T
+                    assert projections_T.shape == (pca.n_components, len(tokens))
+
+                    # Write to stores 
+                    # For future information: Writing is the bottleneck here. 
+                    positive_writer.add_batch_examples(
+                        scores_per_example=max_positive_score_per_component,
+                        input_ids_batch=input_ids_batch,
+                        scores_per_token_batch=projections_T,
+                        latent_idx=latent_idx,
+                        dataset_name=dataset_name,
+                    )
+
+                    negative_writer.add_batch_examples(
+                        scores_per_example=max_negative_score_per_component,
+                        input_ids_batch=input_ids_batch,
+                        scores_per_token_batch=projections_T,
+                        latent_idx=latent_idx,
+                        dataset_name=dataset_name,
+                    )
 
     def _run_analysis_for_layer(
         self, layer_idx: int, target: str, model_results_dir: Path

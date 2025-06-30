@@ -29,8 +29,11 @@ datasets:
   use_pretraining_dataset: true
   use_training_dataset: true
   normalization:
-    enabled: true
-    target_rms: 200.0
+    enabled: True
+    subsample_size: 1_000_000
+    batch_size: 4096
+    cache_dir: "${infrastructure.storage.base_dir}/diff_normalizer"
+    target_rms: 100.0
 
 # Model configuration
 model:

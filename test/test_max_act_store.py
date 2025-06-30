@@ -16,7 +16,7 @@ import shutil
 from pathlib import Path
 import sqlite3
 
-from src.utils.max_act_store import MaxActStore, AsyncMaxActStoreWriter
+from src.utils.max_act_store import MaxActStore, AsyncMaxActStoreWriter, ReadOnlyMaxActStore
 
 class MockTokenizer:
     """Mock tokenizer for testing."""
@@ -48,11 +48,11 @@ def mock_tokenizer():
 def sample_token_sequences():
     """Fixture providing sample token sequences for testing."""
     return [
-        torch.tensor([1, 2, 3, 4]),
-        torch.tensor([5, 6, 7]),
-        torch.tensor([8, 9, 10, 11, 12]),
-        torch.tensor([13, 14]),
-        torch.tensor([15, 16, 17, 18])
+        (0, torch.tensor([1, 2, 3, 4])),
+        (1, torch.tensor([5, 6, 7])),
+        (2, torch.tensor([8, 9, 10, 11, 12])),
+        (3, torch.tensor([13, 14])),
+        (4, torch.tensor([15, 16, 17, 18]))
     ]
 
 
@@ -61,7 +61,7 @@ def sample_quantile_examples():
     """Fixture providing sample quantile examples data."""
     return {
         0: {  # quantile_idx 0
-            0: [(0.9, 0), (0.8, 1)],  # latent_idx 0: [(score, sequence_idx), ...]
+            0: [(0.9, 0), (0.8, 1)],  # latent_idx 0: [(score, sequence_uid), ...]
             1: [(0.7, 2)],             # latent_idx 1
         },
         1: {  # quantile_idx 1
@@ -75,24 +75,258 @@ def sample_quantile_examples():
 def sample_activation_details():
     """Fixture providing sample activation details."""
     return {
+        "sparse": {
         0: {  # latent_idx 0
-            0: (np.array([0, 1, 2]), np.array([0.9, 0.8, 0.7])),  # sequence_idx 0
-            1: (np.array([0, 1]), np.array([0.8, 0.6])),           # sequence_idx 1
-            3: (np.array([0]), np.array([0.6])),                   # sequence_idx 3
+            0: (np.array([0, 1, 2]), np.array([0.9, 0.8, 0.7])),  # sequence_uid 0
+            1: (np.array([0, 1]), np.array([0.8, 0.6])),           # sequence_uid 1
+            3: (np.array([0]), np.array([0.6])),                   # sequence_uid 3
         },
         1: {  # latent_idx 1
-            2: (np.array([0, 1, 2]), np.array([0.7, 0.5, 0.4])),  # sequence_idx 2
+            2: (np.array([0, 1, 2]), np.array([0.7, 0.5, 0.4])),  # sequence_uid 2
         },
         2: {  # latent_idx 2
-            4: (np.array([0, 1]), np.array([0.5, 0.3])),           # sequence_idx 4
+            4: (np.array([0, 1]), np.array([0.5, 0.3])),           # sequence_uid 4
         }
-    }
+        },
+        "dense": {
+            0: {  # latent_idx 0
+                0: np.array([0.0, 0.9, 0.8, 0.7]),  # sequence_uid 0
+                1: np.array([0.8, 0.6, 0.0]),           # sequence_uid 1
+                3: np.array([0.6, 0.0]),                   # sequence_uid 3
+            },
+    }}
+
+
+@pytest.fixture
+def populated_store(temp_db_path, sample_quantile_examples, sample_token_sequences, 
+                   sample_activation_details, mock_tokenizer):
+    """Fixture providing a populated MaxActStore for read-only testing."""
+    # Create and populate a store
+    store = MaxActStore(temp_db_path, tokenizer=mock_tokenizer, storage_format='sparse')
+    store.fill(sample_quantile_examples, sample_token_sequences, sample_activation_details['sparse'])
+    return store
 
 
 @pytest.fixture(params=['sparse', 'dense'])
 def storage_format(request):
     """Parametrized fixture for testing both storage formats."""
     return request.param
+
+
+class TestReadOnlyMaxActStore:
+    """Test class for ReadOnlyMaxActStore functionality."""
+    
+    def test_initialization_from_existing_store(self, populated_store, mock_tokenizer):
+        """Test initializing ReadOnlyMaxActStore from existing database."""
+        db_path = populated_store.db_manager.db_path
+        
+        # Create read-only store
+        readonly_store = ReadOnlyMaxActStore(db_path, tokenizer=mock_tokenizer)
+        
+        assert readonly_store.storage_format == 'sparse'
+        assert readonly_store.max_examples is None
+        assert readonly_store.tokenizer == mock_tokenizer
+    
+    def test_initialization_nonexistent_database(self, temp_db_path):
+        """Test initialization with non-existent database."""
+        nonexistent_path = temp_db_path.parent / "nonexistent.db"
+        
+        with pytest.raises(Exception):  # Should fail to open non-existent read-only database
+            ReadOnlyMaxActStore(nonexistent_path)
+    
+    def test_initialization_missing_config(self, temp_db_path):
+        """Test initialization with database missing config table."""
+        # Create empty database without config
+        with sqlite3.connect(temp_db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute("CREATE TABLE dummy (id INTEGER)")
+            conn.commit()
+        
+        with pytest.raises(sqlite3.OperationalError, match="no such table: config"):
+            ReadOnlyMaxActStore(temp_db_path)
+    
+    def test_read_operations_match_original(self, populated_store, mock_tokenizer):
+        """Test that read operations return same results as original store."""
+        db_path = populated_store.db_manager.db_path
+        
+        # Get original results
+        original_examples = populated_store.get_top_examples()
+        original_count = len(populated_store)
+        
+        # Create read-only store and compare
+        readonly_store = ReadOnlyMaxActStore(db_path, tokenizer=mock_tokenizer)
+        
+        readonly_examples = readonly_store.get_top_examples()
+        readonly_count = len(readonly_store)
+        
+        assert readonly_count == original_count
+        assert len(readonly_examples) == len(original_examples)
+        
+        # Compare example details
+        for orig, readonly in zip(original_examples, readonly_examples):
+            assert orig["example_id"] == readonly["example_id"]
+            assert orig["max_score"] == readonly["max_score"]
+            assert orig["input_ids"] == readonly["input_ids"]
+            assert orig["latent_idx"] == readonly["latent_idx"]
+            assert orig["quantile_idx"] == readonly["quantile_idx"]
+    
+    def test_filtering_operations(self, populated_store, mock_tokenizer):
+        """Test filtering operations work correctly in read-only mode."""
+        db_path = populated_store.db_manager.db_path
+        readonly_store = ReadOnlyMaxActStore(db_path, tokenizer=mock_tokenizer)
+        
+        # Test latent_idx filtering
+        latent_0_examples = readonly_store.get_top_examples(latent_idx=0)
+        assert len(latent_0_examples) > 0
+        assert all(ex["latent_idx"] == 0 for ex in latent_0_examples)
+        
+        # Test limit
+        limited_examples = readonly_store.get_top_examples(limit=2)
+        assert len(limited_examples) == 2
+        
+        # Test combined filters
+        combined_examples = readonly_store.get_top_examples(latent_idx=0, limit=1)
+        assert len(combined_examples) <= 1
+        if combined_examples:
+            assert combined_examples[0]["latent_idx"] == 0
+    
+    def test_concurrent_access_simulation(self, populated_store, mock_tokenizer):
+        """Test that multiple ReadOnlyMaxActStore instances can access same database."""
+        db_path = populated_store.db_manager.db_path
+        
+        # Create multiple read-only instances
+        stores = [ReadOnlyMaxActStore(db_path, tokenizer=mock_tokenizer) for _ in range(3)]
+        
+        # All should be able to read simultaneously
+        results = []
+        for store in stores:
+            examples = store.get_top_examples(limit=2)
+            results.append(examples)
+        
+        # All results should be identical
+        for i in range(1, len(results)):
+            assert len(results[i]) == len(results[0])
+            for j in range(len(results[i])):
+                assert results[i][j]["example_id"] == results[0][j]["example_id"]
+                assert results[i][j]["max_score"] == results[0][j]["max_score"]
+    
+    def test_wal_mode_setup(self, populated_store, mock_tokenizer):
+        """Test that WAL mode is set up correctly."""
+        db_path = populated_store.db_manager.db_path
+        readonly_store = ReadOnlyMaxActStore(db_path, tokenizer=mock_tokenizer)
+        
+        # Check that WAL mode was attempted (we can't easily verify it was successful)
+        # This test mainly ensures the WAL setup code runs without error
+        assert readonly_store is not None
+    
+    def test_read_only_property_enforcement(self, populated_store, mock_tokenizer):
+        """Test that read-only store properly handles read-only database connection."""
+        db_path = populated_store.db_manager.db_path
+        readonly_store = ReadOnlyMaxActStore(db_path, tokenizer=mock_tokenizer)
+        
+        # Should be able to read
+        examples = readonly_store.get_top_examples()
+        assert len(examples) > 0
+        
+        # Database manager should be in read-only mode
+        assert readonly_store.db_manager.readonly == True
+    
+    def test_storage_format_detection(self, temp_db_path, mock_tokenizer):
+        """Test that storage format is correctly detected from database."""
+        # Test with dense format
+        dense_store = MaxActStore(temp_db_path, storage_format='dense', tokenizer=mock_tokenizer)
+        dense_store.add_example(0.8, torch.tensor([1, 2, 3]))
+        
+        readonly_store = ReadOnlyMaxActStore(temp_db_path, tokenizer=mock_tokenizer)
+        assert readonly_store.storage_format == 'dense'
+    
+    def test_dataset_operations(self, temp_db_path, mock_tokenizer):
+        """Test dataset-related operations in read-only mode."""
+        # Create store with dataset info
+        store = MaxActStore(temp_db_path, tokenizer=mock_tokenizer)
+        store.add_example(0.8, torch.tensor([1, 2, 3]), dataset_name="dataset_A", dataset_id=1)
+        store.add_example(0.7, torch.tensor([4, 5, 6]), dataset_name="dataset_B", dataset_id=2)
+        
+        readonly_store = ReadOnlyMaxActStore(temp_db_path, tokenizer=mock_tokenizer)
+        
+        # Test dataset filtering
+        dataset_a_examples = readonly_store.get_top_examples(dataset_names=["dataset_A"])
+        assert len(dataset_a_examples) == 1
+        assert dataset_a_examples[0]["dataset_name"] == "dataset_A"
+        
+        both_datasets = readonly_store.get_top_examples(dataset_names=["dataset_A", "dataset_B"])
+        assert len(both_datasets) == 2
+    
+    def test_error_handling_corrupted_database(self, temp_db_path):
+        """Test error handling with corrupted database."""
+        # Create corrupted database
+        with open(temp_db_path, 'w') as f:
+            f.write("corrupted data")
+        
+        with pytest.raises(Exception):  # Should fail to read corrupted database
+            ReadOnlyMaxActStore(temp_db_path)
+    
+    def test_large_dataset_performance(self, temp_db_path, mock_tokenizer):
+        """Test performance with larger dataset."""
+        # Create store with more examples
+        store = MaxActStore(temp_db_path, tokenizer=mock_tokenizer)
+        
+        # Add 100 examples
+        for i in range(100):
+            store.add_example(
+                score=float(i) / 100.0,
+                input_ids=torch.randint(1, 1000, (10,)),
+                latent_idx=i % 5,
+                quantile_idx=i % 3
+            )
+        
+        readonly_store = ReadOnlyMaxActStore(temp_db_path, tokenizer=mock_tokenizer)
+        
+        # Test that reads are still fast
+        import time
+        start_time = time.time()
+        examples = readonly_store.get_top_examples(limit=50)
+        read_time = time.time() - start_time
+        
+        assert len(examples) == 50
+        assert read_time < 1.0  # Should be fast
+        
+        # Test filtered reads
+        latent_examples = readonly_store.get_top_examples(latent_idx=0, limit=20)
+        assert len(latent_examples) <= 20
+        assert all(ex["latent_idx"] == 0 for ex in latent_examples)
+    
+    def test_config_loading_edge_cases(self, temp_db_path):
+        """Test config loading with various edge cases."""
+        # Create database with only storage_format config
+        with sqlite3.connect(temp_db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute("CREATE TABLE config (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+            cursor.execute("INSERT INTO config VALUES ('storage_format', 'sparse')")
+            cursor.execute("CREATE TABLE sequences (sequence_uid INTEGER PRIMARY KEY, token_ids BLOB, text TEXT, sequence_length INTEGER, dataset_id INTEGER, dataset_name TEXT)")
+            cursor.execute("CREATE TABLE examples (example_id INTEGER PRIMARY KEY, sequence_uid INTEGER, score REAL, latent_idx INTEGER, quantile_idx INTEGER, metadata TEXT)")
+            cursor.execute("CREATE TABLE activation_details (example_id INTEGER PRIMARY KEY, positions BLOB, activation_values BLOB)")
+            conn.commit()
+        
+        readonly_store = ReadOnlyMaxActStore(temp_db_path)
+        assert readonly_store.storage_format == 'sparse'
+        assert readonly_store.max_examples is None
+    
+    def test_empty_database_operations(self, temp_db_path, mock_tokenizer):
+        """Test operations on empty but valid database."""
+        # Create empty store
+        store = MaxActStore(temp_db_path, tokenizer=mock_tokenizer)
+        # Don't add any examples
+        
+        readonly_store = ReadOnlyMaxActStore(temp_db_path, tokenizer=mock_tokenizer)
+        
+        assert len(readonly_store) == 0
+        examples = readonly_store.get_top_examples()
+        assert len(examples) == 0
+        
+        # Filtered queries on empty database should also work
+        latent_examples = readonly_store.get_top_examples(latent_idx=0)
+        assert len(latent_examples) == 0
 
 
 class TestMaxActStore:
@@ -102,7 +336,8 @@ class TestMaxActStore:
         """Test basic initialization with sparse storage."""
         store = MaxActStore(temp_db_path, max_examples=100, tokenizer=mock_tokenizer, storage_format='sparse')
         
-        assert store.db_path == temp_db_path
+        assert store.db_manager.db_path == temp_db_path
+        assert store.db_manager.readonly == False
         assert store.max_examples == 100
         assert store.tokenizer == mock_tokenizer
         assert store.storage_format == 'sparse'
@@ -131,7 +366,8 @@ class TestMaxActStore:
     def test_initialization_invalid_format(self, temp_db_path):
         """Test initialization with invalid storage format."""
         with pytest.raises(ValueError):
-            MaxActStore(temp_db_path, storage_format='invalid')
+            # Use type ignore to bypass type checker for this test
+            MaxActStore(temp_db_path, storage_format='invalid')  # type: ignore
     
     def test_length_empty(self, temp_db_path, storage_format):
         """Test length method on empty database."""
@@ -208,7 +444,7 @@ class TestMaxActStore:
         """Helper method to test sparse activation details formats."""
         # Test with tuple format for sparse storage
         examples_data = {0: {0: [(0.8, 0)]}}
-        sequences = [torch.tensor([1, 2, 3])]
+        sequences = [(0, torch.tensor([1, 2, 3]))]
         activation_details = {
             0: {0: (np.array([0, 1]), np.array([0.8, 0.6]))}  # Tuple format (positions, values)
         }
@@ -256,7 +492,7 @@ class TestMaxActStore:
         """Helper method to test dense activation details formats."""
         # Test with dense array format (just the values array)
         examples_data = {0: {0: [(0.8, 0)]}}
-        sequences = [torch.tensor([1, 2, 3])]
+        sequences = [(0, torch.tensor([1, 2, 3]))]
         activation_details = {
             0: {0: np.array([0.8, 0.6, 0.0])}  # Dense format - single values array
         }
@@ -277,7 +513,7 @@ class TestMaxActStore:
     def test_storage_format_efficiency(self, temp_db_path):
         """Test that dense storage is more efficient for high-density activations."""
         # Create data with high density (all positions have activations)
-        sequences = [torch.tensor([1, 2, 3, 4, 5])]
+        sequences = [(0, torch.tensor([1, 2, 3, 4, 5]))]
         examples_data = {0: {0: [(0.8, 0)]}}
         
         # Test sparse storage with tuple format
@@ -316,7 +552,7 @@ class TestMaxActStore:
         """Test bulk loading with fill method."""
         store = MaxActStore(temp_db_path, tokenizer=mock_tokenizer, storage_format=storage_format)
         
-        store.fill(sample_quantile_examples, sample_token_sequences, sample_activation_details)
+        store.fill(sample_quantile_examples, sample_token_sequences, sample_activation_details[storage_format])
         
         # Should have 5 total examples
         assert len(store) == 5
@@ -434,8 +670,8 @@ class TestMaxActStore:
         store2 = MaxActStore(store2_path, tokenizer=mock_tokenizer, storage_format=storage_format)
         
         # Add data with overlapping sequence indices
-        sequences1 = [torch.tensor([1, 2, 3]), torch.tensor([4, 5, 6])]
-        sequences2 = [torch.tensor([7, 8, 9]), torch.tensor([10, 11, 12])]
+        sequences1 = [(0, torch.tensor([1, 2, 3])), (1, torch.tensor([4, 5, 6]))]
+        sequences2 = [(0, torch.tensor([7, 8, 9])), (1, torch.tensor([10, 11, 12]))]
         
         examples_data1 = {0: {0: [(0.9, 0), (0.8, 1)]}}
         examples_data2 = {0: {1: [(0.7, 0), (0.6, 1)]}}
@@ -447,12 +683,12 @@ class TestMaxActStore:
         assert len(store2) == 2
         
         # Merge with offset of 1000 to separate datasets
-        store1.merge(store2, sequence_idx_offset=1000)
+        store1.merge(store2, sequence_uid_offset=1000)
         
         assert len(store1) == 4
         
         examples = store1.get_top_examples()
-        sequence_indices = [ex["sequence_idx"] for ex in examples]
+        sequence_indices = [ex["sequence_uid"] for ex in examples]
         
         # Original store1 sequences should have indices 0, 1
         # Merged store2 sequences should have indices 1000, 1001
@@ -469,7 +705,7 @@ class TestMaxActStore:
         store1 = MaxActStore(store1_path, storage_format=storage_format)
         store2 = MaxActStore(store2_path, storage_format=storage_format)
         
-        # Add data to store1 using add_example to get sequence_idx = hash(...)
+        # Add data to store1 using add_example to get sequence_uid = hash(...)
         store1.add_example(
             score=0.9,
             input_ids=torch.tensor([1, 2, 3])
@@ -484,15 +720,15 @@ class TestMaxActStore:
         # Get the actual sequence indices that were created
         examples1 = store1.get_top_examples()
         examples2 = store2.get_top_examples()
-        seq_idx1 = examples1[0]["sequence_idx"]
-        seq_idx2 = examples2[0]["sequence_idx"]
+        seq_idx1 = examples1[0]["sequence_uid"]
+        seq_idx2 = examples2[0]["sequence_uid"]
         
         # Calculate offset that would cause a conflict
         conflict_offset = seq_idx1 - seq_idx2
         
         # Merge with offset that would cause conflict
-        with pytest.raises(ValueError, match="Sequence index conflict"):
-            store1.merge(store2, sequence_idx_offset=conflict_offset)
+        with pytest.raises(ValueError, match="Index conflict"):
+            store1.merge(store2, sequence_uid_offset=conflict_offset)
 
     def test_merge_storage_format_mismatch(self, temp_db_path):
         """Test merge with incompatible storage formats."""
@@ -513,8 +749,8 @@ class TestMaxActStore:
         store1 = MaxActStore(store1_path, storage_format=storage_format)
         store2 = MaxActStore(store2_path, storage_format=storage_format)
         
-        sequences1 = [torch.tensor([1, 2, 3])]
-        sequences2 = [torch.tensor([4, 5, 6, 7])]
+        sequences1 = [(0, torch.tensor([1, 2, 3]))]
+        sequences2 = [(0, torch.tensor([4, 5, 6, 7]))]
         
         examples_data1 = {0: {0: [(0.9, 0)]}}
         examples_data2 = {0: {1: [(0.7, 0)]}}
@@ -530,7 +766,7 @@ class TestMaxActStore:
         store2.fill(examples_data2, sequences2, activation_details2)
         
         # Merge with offset
-        store1.merge(store2, sequence_idx_offset=100)
+        store1.merge(store2, sequence_uid_offset=100)
         
         examples = store1.get_top_examples()
         assert len(examples) == 2
@@ -639,8 +875,8 @@ class TestMaxActStore:
         store2 = MaxActStore(store2_path, tokenizer=mock_tokenizer, storage_format=storage_format)
         
         # Add data with known sequence indices using fill
-        sequences1 = [torch.tensor([1, 2, 3]), torch.tensor([4, 5, 6])]
-        sequences2 = [torch.tensor([7, 8, 9]), torch.tensor([10, 11, 12])]
+        sequences1 = [(0, torch.tensor([1, 2, 3])), (1, torch.tensor([4, 5, 6]))]
+        sequences2 = [(0, torch.tensor([7, 8, 9])), (1, torch.tensor([10, 11, 12]))]
         
         examples_data1 = {0: {0: [(0.9, 0), (0.8, 1)]}}  # sequence indices 0, 1
         examples_data2 = {0: {1: [(0.7, 0), (0.6, 1)]}}  # sequence indices 0, 1 (will be offset)
@@ -653,16 +889,16 @@ class TestMaxActStore:
         
         # Get the max sequence index from store1
         examples = store1.get_top_examples()
-        max_seq_idx = max(ex["sequence_idx"] for ex in examples)
+        max_seq_idx = max(ex["sequence_uid"] for ex in examples)
         expected_offset = max_seq_idx + 1
         
         # Merge with auto offset
-        store1.merge(store2, sequence_idx_offset="auto")
+        store1.merge(store2, sequence_uid_offset="auto")
         
         assert len(store1) == 4
         
         all_examples = store1.get_top_examples()
-        sequence_indices = [ex["sequence_idx"] for ex in all_examples]
+        sequence_indices = [ex["sequence_uid"] for ex in all_examples]
         
         # Should have original indices (0, 1) and offset indices (expected_offset, expected_offset+1)
         assert 0 in sequence_indices
@@ -690,16 +926,16 @@ class TestMaxActStore:
         
         # Get original sequence index
         original_examples = store2.get_top_examples()
-        original_seq_idx = original_examples[0]["sequence_idx"]
+        original_seq_idx = original_examples[0]["sequence_uid"]
         
         # Merge with auto offset into empty store (should start from 0)
-        store1.merge(store2, sequence_idx_offset="auto")
+        store1.merge(store2, sequence_uid_offset="auto")
         
         assert len(store1) == 1
         merged_examples = store1.get_top_examples()
         
         # With empty target, auto offset should be 0, so sequence index should be original + 0
-        assert merged_examples[0]["sequence_idx"] == original_seq_idx + 0
+        assert merged_examples[0]["sequence_uid"] == original_seq_idx + 0
 
     def test_set_dataset_info(self, temp_db_path, storage_format):
         """Test setting dataset info for all sequences in the store."""
@@ -829,12 +1065,12 @@ class TestMaxActStore:
         dataset_b_examples = [ex for ex in examples_without_dataset if ex["dataset_name"] is None]
         
         # Update these specific sequences
-        with sqlite3.connect(store.db_path) as conn:
+        with sqlite3.connect(store.db_manager.db_path) as conn:
             cursor = conn.cursor()
             cursor.execute("PRAGMA foreign_keys = ON")
             for ex in dataset_b_examples:
-                cursor.execute("UPDATE sequences SET dataset_name = ? WHERE sequence_idx = ?", 
-                             ("dataset_B", ex["sequence_idx"]))
+                cursor.execute("UPDATE sequences SET dataset_name = ? WHERE sequence_uid = ?", 
+                             ("dataset_B", ex["sequence_uid"]))
             conn.commit()
         
         # Should have 4 total examples (2 per dataset)
@@ -854,6 +1090,56 @@ class TestMaxActStore:
         
         assert dataset_a_scores == [0.9, 0.8]  # Dropped 0.7
         assert dataset_b_scores == [0.95, 0.75]  # Dropped 0.65
+    
+    def test_top_k_basic_batch_insertion(self, temp_db_path, storage_format):
+        """Test basic top-k functionality with batch insertion."""
+        store = MaxActStore(temp_db_path, max_examples=3, storage_format=storage_format)
+        
+        # Create batch data - 5 examples, should keep top 3
+        batch_size = 5
+        scores = torch.tensor([0.9, 0.8, 0.7, 0.6, 0.5])
+        input_ids_batch = torch.stack([
+            torch.tensor([i, i+1, i+2]) for i in range(batch_size)
+        ])
+        scores_per_token_batch = torch.stack([
+            torch.tensor([scores[i], scores[i]-0.1, scores[i]-0.2]) 
+            for i in range(batch_size)
+        ])
+        additional_data_batch = [{"example_idx": i} for i in range(batch_size)]
+        
+        # Add batch examples
+        store.add_batch_examples(
+            scores_per_example=scores,
+            input_ids_batch=input_ids_batch,
+            scores_per_token_batch=scores_per_token_batch,
+            additional_data_batch=additional_data_batch,
+            dataset_name="test_dataset",
+            dataset_id=1
+        )
+        
+        # Should have exactly 3 examples (top-k maintained)
+        assert len(store) == 3
+        
+        # Get examples and verify they are the top 3 scores
+        examples = store.get_top_examples()
+        example_scores = [ex["max_score"] for ex in examples]
+        
+        # Should be sorted in descending order and contain top 3 scores
+        assert torch.allclose(torch.tensor(example_scores), torch.tensor([0.9, 0.8, 0.7]))
+        
+        # Verify the correct input_ids are preserved
+        expected_input_ids = [[0, 1, 2], [1, 2, 3], [2, 3, 4]]  # First 3 examples
+        actual_input_ids = [ex["input_ids"] for ex in examples]
+        assert actual_input_ids == expected_input_ids
+        
+        # Verify additional data is preserved
+        expected_indices = [0, 1, 2]
+        actual_indices = [ex["example_idx"] for ex in examples]
+        assert actual_indices == expected_indices
+
+        # Verify that the dataset info is set
+        assert examples[0]["dataset_name"] == "test_dataset"
+        assert examples[0]["dataset_id"] == 1
 
     def test_per_dataset_vs_overall_comparison(self, temp_db_path, storage_format):
         """Test that per-dataset and overall top-k behave differently."""
@@ -918,13 +1204,13 @@ class TestMaxActStore:
         
         # Set dataset for first two examples  
         examples = store.get_top_examples()
-        with sqlite3.connect(store.db_path) as conn:
+        with sqlite3.connect(store.db_manager.db_path) as conn:
             cursor = conn.cursor()
             cursor.execute("PRAGMA foreign_keys = ON")
-            cursor.execute("UPDATE sequences SET dataset_name = ? WHERE sequence_idx = ?", 
-                         ("dataset_A", examples[0]["sequence_idx"]))
-            cursor.execute("UPDATE sequences SET dataset_name = ? WHERE sequence_idx = ?", 
-                         ("dataset_A", examples[1]["sequence_idx"]))
+            cursor.execute("UPDATE sequences SET dataset_name = ? WHERE sequence_uid = ?", 
+                         ("dataset_A", examples[0]["sequence_uid"]))
+            cursor.execute("UPDATE sequences SET dataset_name = ? WHERE sequence_uid = ?", 
+                         ("dataset_A", examples[1]["sequence_uid"]))
             conn.commit()
         
         # Add more examples with explicit NULL dataset (leave as-is)
@@ -990,6 +1276,7 @@ class TestMaxActStore:
         assert not async_writer.is_running
         
         # Verify data was written to store
+        assert store.get_num_sequences() == batch_size
         assert len(store) == batch_size
         examples = store.get_top_examples()
         assert all(ex["dataset_name"] == "test_dataset" for ex in examples)
@@ -1868,23 +2155,6 @@ class TestMaxActStore:
         overall_scores = [ex["max_score"] for ex in overall_examples]
         assert sorted(overall_scores, reverse=True) == [0.85, 0.55]
 
-    def test_get_lowest_score_for_group(self, temp_db_path, storage_format):
-        """Test getting lowest scores for specific groups."""
-        store = MaxActStore(temp_db_path, storage_format=storage_format)
-        
-        # Add examples for different groups
-        store.add_example(0.9, torch.tensor([1, 2, 3]), latent_idx=0, quantile_idx=0)
-        store.add_example(0.8, torch.tensor([4, 5, 6]), latent_idx=0, quantile_idx=0)
-        store.add_example(0.95, torch.tensor([7, 8, 9]), latent_idx=1, quantile_idx=0)
-        store.add_example(0.75, torch.tensor([10, 11, 12]), latent_idx=1, quantile_idx=0)
-        
-        # Test group-specific lowest scores
-        assert store.get_lowest_score_for_group(latent_idx=0, quantile_idx=0) == 0.8
-        assert store.get_lowest_score_for_group(latent_idx=1, quantile_idx=0) == 0.75
-        
-        # Test with non-existent group
-        assert store.get_lowest_score_for_group(latent_idx=2, quantile_idx=0) is None
-
     def test_get_group_capacity_info(self, temp_db_path, storage_format):
         """Test getting capacity info for all groups."""
         store = MaxActStore(temp_db_path, max_examples=3, storage_format=storage_format)
@@ -1896,24 +2166,29 @@ class TestMaxActStore:
         store.add_example(0.75, torch.tensor([10, 11, 12]), latent_idx=1, quantile_idx=0)
         store.add_example(0.85, torch.tensor([13, 14, 15]), latent_idx=1, quantile_idx=0)
         
+        assert len(store) == 5
+        
         capacity_info = store.get_group_capacity_info()
         
         # Should have info for both groups
         group_00_key = (('latent_idx', 0), ('quantile_idx', 0))
         group_10_key = (('latent_idx', 1), ('quantile_idx', 0))
         
+        assert group_10_key in capacity_info
+        assert group_00_key not in capacity_info # We haven't reached the capacity yet
+
+        store.add_example(0.65, torch.tensor([10, 11, 12]), latent_idx=0, quantile_idx=0)
+
+        capacity_info = store.get_group_capacity_info()
+        print(capacity_info)
         assert group_00_key in capacity_info
         assert group_10_key in capacity_info
         
         # Check group (0,0) info
-        assert capacity_info[group_00_key]['count'] == 2
-        assert capacity_info[group_00_key]['min_score'] == 0.8
-        assert capacity_info[group_00_key]['is_full'] == False  # 2 < 3
+        assert capacity_info[group_00_key] == 0.65
         
         # Check group (1,0) info  
-        assert capacity_info[group_10_key]['count'] == 3
-        assert capacity_info[group_10_key]['min_score'] == 0.75
-        assert capacity_info[group_10_key]['is_full'] == True   # 3 == 3
+        assert capacity_info[group_10_key] == 0.75
 
     def test_batch_examples_with_per_group_indices(self, temp_db_path, storage_format):
         """Test add_batch_examples with per-example latent/quantile indices."""
@@ -1953,3 +2228,5 @@ class TestMaxActStore:
         assert torch.isclose(torch.tensor(examples_01[0]["max_score"]), torch.tensor(0.8))
         assert torch.isclose(torch.tensor(examples_10[0]["max_score"]), torch.tensor(0.95))
         assert torch.isclose(torch.tensor(examples_11[0]["max_score"]), torch.tensor(0.75))
+
+
