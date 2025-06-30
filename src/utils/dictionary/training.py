@@ -289,9 +289,9 @@ def setup_training_datasets(
         ),
     )
 
-    logger.info(f"Using {sum(num_samples_per_dataset)} samples in total")
+    logger.info(f"Using {sum(num_samples_per_dataset)} tokens in total")
     for dataset_name, num_samples in zip(caches.keys(), num_samples_per_dataset):
-        logger.info(f"\tUsing {num_samples} samples for {dataset_name}")
+        logger.info(f"\tUsing {num_samples} tokens for {dataset_name}")
 
     # Create training dataset
     train_dataset = ConcatDataset(

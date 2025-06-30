@@ -79,58 +79,54 @@ class WriteRequest:
     response_queue: Optional[mp.Queue] = None
 
 
-class TensorProcessor:
-    """Handles tensor/array conversions and validations consistently."""
+def process_batch_tensors(input_ids_batch: List[torch.Tensor]|torch.Tensor,
+                            attention_mask_batch: Optional[torch.Tensor] = None,
+                            scores_per_token_batch: Optional[torch.Tensor|List[torch.Tensor]] = None) -> Tuple[List[List[int]], Optional[List[Optional[np.ndarray]]]]:
+    """
+    Process batch tensors consistently, applying attention masks and converting to numpy.
     
-    @staticmethod
-    def process_batch_tensors(input_ids_batch: List[torch.Tensor]|torch.Tensor,
-                             attention_mask_batch: Optional[torch.Tensor] = None,
-                             scores_per_token_batch: Optional[torch.Tensor|List[torch.Tensor]] = None) -> Tuple[List[List[int]], Optional[List[Optional[np.ndarray]]]]:
-        """
-        Process batch tensors consistently, applying attention masks and converting to numpy.
+    Returns:
+        Tuple of (processed_input_ids, processed_scores_per_token)
+    """
+    batch_size = len(input_ids_batch)
+    
+    if attention_mask_batch is None:
+        if isinstance(input_ids_batch, torch.Tensor):
+            # All have the same lengths
+            processed_input_ids = input_ids_batch.cpu().numpy()
+        else:
+            # Different lengths
+            processed_input_ids = [input_ids.cpu().numpy() for input_ids in input_ids_batch]
         
-        Returns:
-            Tuple of (processed_input_ids, processed_scores_per_token)
-        """
-        batch_size = len(input_ids_batch)
-        
-        if attention_mask_batch is None:
-            if isinstance(input_ids_batch, torch.Tensor):
+        if scores_per_token_batch is not None:
+            if isinstance(scores_per_token_batch, torch.Tensor):
                 # All have the same lengths
-                processed_input_ids = input_ids_batch.cpu().numpy()
+                processed_scores_per_token = scores_per_token_batch.cpu().numpy()
             else:
                 # Different lengths
-                processed_input_ids = [input_ids.cpu().numpy() for input_ids in input_ids_batch]
+                processed_scores_per_token = [el.cpu().numpy() for el in scores_per_token_batch]
+        else:
+            processed_scores_per_token = None
+    else:
+        # TODO: If it's a tensor we can make it efficient
+        # Apply attention mask per example
+        processed_input_ids = []
+        processed_scores_per_token = []
+        
+        for i in range(batch_size):
+            input_ids = input_ids_batch[i]
+            valid_mask = attention_mask_batch[i].bool()
+            input_ids = input_ids[valid_mask]
+            
+            processed_input_ids.append(input_ids.cpu().numpy())
             
             if scores_per_token_batch is not None:
-                if isinstance(scores_per_token_batch, torch.Tensor):
-                    # All have the same lengths
-                    processed_scores_per_token = scores_per_token_batch.cpu().numpy()
-                else:
-                    # Different lengths
-                    processed_scores_per_token = [el.cpu().numpy() for el in scores_per_token_batch]
+                scores_per_token = scores_per_token_batch[i][valid_mask]
+                processed_scores_per_token.append(scores_per_token.cpu())
             else:
                 processed_scores_per_token = None
-        else:
-            # TODO: If it's a tensor we can make it efficient
-            # Apply attention mask per example
-            processed_input_ids = []
-            processed_scores_per_token = []
-            
-            for i in range(batch_size):
-                input_ids = input_ids_batch[i]
-                valid_mask = attention_mask_batch[i].bool()
-                input_ids = input_ids[valid_mask]
-                
-                processed_input_ids.append(input_ids.cpu().numpy())
-                
-                if scores_per_token_batch is not None:
-                    scores_per_token = scores_per_token_batch[i][valid_mask]
-                    processed_scores_per_token.append(scores_per_token.cpu())
-                else:
-                    processed_scores_per_token = None
-        
-        return processed_input_ids, processed_scores_per_token
+    
+    return processed_input_ids, processed_scores_per_token
 
 
 class DatabaseManager:
@@ -319,20 +315,31 @@ class MultiProcessTopKProxy(TopKProxy):
             return self.min_scores.get(group_key, float('-inf'))
 
 def legacy_converter(db_path: Path):
-    """Convert legacy sequence_idx column to sequence_uid in the sequences table."""
+    """Convert legacy sequence_idx column to sequence_uid in the sequences and examples tables."""
     with sqlite3.connect(db_path) as conn:
         cursor = conn.cursor()
         
-        # Check if sequences table exists and has sequence_idx column
-        cursor.execute("PRAGMA table_info(sequences)")
-        columns = {row[1]: row for row in cursor.fetchall()}
+        # Get list of existing tables
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        existing_tables = {row[0] for row in cursor.fetchall()}
         
-        if 'sequences' not in [row[0] for row in cursor.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]:
-            # No sequences table exists, nothing to convert
-            return
-            
-        if 'sequence_idx' not in columns:
-            # Already using sequence_uid or table doesn't exist
+        # Check if sequences table exists and has sequence_idx column
+        sequences_needs_conversion = False
+        if 'sequences' in existing_tables:
+            cursor.execute("PRAGMA table_info(sequences)")
+            sequences_columns = {row[1]: row for row in cursor.fetchall()}
+            sequences_needs_conversion = 'sequence_idx' in sequences_columns
+        
+        # Check if examples table exists and has sequence_idx column
+        examples_needs_conversion = False
+        if 'examples' in existing_tables:
+            cursor.execute("PRAGMA table_info(examples)")
+            examples_columns = {row[1]: row for row in cursor.fetchall()}
+            examples_needs_conversion = 'sequence_idx' in examples_columns
+        
+
+        # If no conversion needed, return early
+        if not sequences_needs_conversion and not examples_needs_conversion:
             return
             
         logger.info("Converting legacy sequence_idx column to sequence_uid...")
@@ -341,29 +348,56 @@ def legacy_converter(db_path: Path):
         cursor.execute("BEGIN TRANSACTION")
         
         try:
-            # Create new table with sequence_uid
-            cursor.execute("""
-                CREATE TABLE sequences_new (
-                    sequence_uid INTEGER PRIMARY KEY,
-                    input_ids BLOB NOT NULL,
-                    dataset_id INTEGER,
-                    dataset_name TEXT
-                )
-            """)
+            # Convert sequences table
+            if sequences_needs_conversion:
+                cursor.execute("""
+                    CREATE TABLE sequences_new (
+                        sequence_uid INTEGER PRIMARY KEY,
+                        token_ids BLOB NOT NULL,
+                        text TEXT,
+                        sequence_length INTEGER NOT NULL,
+                        dataset_id INTEGER,
+                        dataset_name TEXT
+                    )
+                """)
+                
+                cursor.execute("""
+                    INSERT INTO sequences_new (sequence_uid, token_ids, text, sequence_length, dataset_id, dataset_name)
+                    SELECT sequence_idx, token_ids, text, sequence_length, dataset_id, dataset_name
+                    FROM sequences
+                """)
+                
+                cursor.execute("DROP TABLE sequences")
+                cursor.execute("ALTER TABLE sequences_new RENAME TO sequences")
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_dataset_name ON sequences(dataset_name)")
             
-            # Copy data from old table to new table
-            cursor.execute("""
-                INSERT INTO sequences_new (sequence_uid, input_ids, dataset_id, dataset_name)
-                SELECT sequence_idx, input_ids, dataset_id, dataset_name
-                FROM sequences
-            """)
-            
-            # Drop old table and rename new table
-            cursor.execute("DROP TABLE sequences")
-            cursor.execute("ALTER TABLE sequences_new RENAME TO sequences")
-            
-            # Recreate indexes if they existed
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_dataset_name ON sequences(dataset_name)")
+            # Convert examples table
+            if examples_needs_conversion:
+                cursor.execute("""
+                    CREATE TABLE examples_new (
+                        example_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        sequence_uid INTEGER NOT NULL,
+                        score REAL NOT NULL,
+                        latent_idx INTEGER DEFAULT NULL,
+                        quantile_idx INTEGER DEFAULT NULL,
+                        metadata TEXT,
+                        FOREIGN KEY (sequence_uid) REFERENCES sequences(sequence_uid)
+                    )
+                """)
+                
+                cursor.execute("""
+                    INSERT INTO examples_new (example_id, sequence_uid, score, latent_idx, quantile_idx, metadata)
+                    SELECT example_id, sequence_idx, score, latent_idx, quantile_idx, metadata
+                    FROM examples
+                """)
+                
+                cursor.execute("DROP TABLE examples")
+                cursor.execute("ALTER TABLE examples_new RENAME TO examples")
+                
+                # Recreate indexes
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_examples_score ON examples(score DESC)")
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_examples_latent ON examples(latent_idx)")
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_examples_quantile ON examples(quantile_idx)")
             
             cursor.execute("COMMIT")
             logger.info("Successfully converted sequence_idx to sequence_uid")
@@ -399,6 +433,7 @@ class MaxActStore:
             per_dataset: If True, maintain max_examples per dataset
             top_k_proxy: Optional top-k proxy to use for early filtering
         """
+        legacy_converter(db_path)
         self._setup_db_manager(db_path)
         self.tokenizer = tokenizer
         self.per_dataset = per_dataset
@@ -411,7 +446,6 @@ class MaxActStore:
         # Initialize database schema
         self._init_database()
 
-        legacy_converter(db_path)
         
         # Cache for sequence indices to avoid duplicate insertions
         self._sequence_uid_cache = set()
@@ -656,7 +690,7 @@ class MaxActStore:
         assert input_ids_batch.shape[0] == batch_size
         
         # Process tensors consistently
-        processed_input_ids, processed_scores_per_token = TensorProcessor.process_batch_tensors(
+        processed_input_ids, processed_scores_per_token = process_batch_tensors(
             input_ids_batch, attention_mask_batch, scores_per_token_batch
         )
         
@@ -737,7 +771,7 @@ class MaxActStore:
         # Bulk insert activation details
         if activation_data:
             self._insert_activation_details_bulk(activation_data)
-x
+
     def _maintain_top_k(self):
         """Remove examples beyond max_examples limit per group."""
         if self._max_examples is None:
@@ -1440,7 +1474,7 @@ class AsyncMaxActStoreWriter:
         batch_size = len(scores_per_example)
         
         # Process tensors using centralized logic
-        processed_input_ids, processed_scores_per_token = TensorProcessor.process_batch_tensors(
+        processed_input_ids, processed_scores_per_token = process_batch_tensors(
             input_ids_batch, attention_mask_batch, scores_per_token_batch
         )
         
@@ -1597,16 +1631,12 @@ class ReadOnlyMaxActStore(MaxActStore):
     
     def __init__(self, db_path: Path, tokenizer=None):
         """Initialize read-only store."""
+        legacy_converter(db_path)
         self._setup_db_manager(db_path)
         self._handle_config(None, None)
         self.tokenizer = tokenizer
         self.activation_handler = ActivationDetailsHandler(self._storage_format)
         
-        legacy_converter(db_path)
-        
-        # Cache for sequence indices to avoid duplicate insertions
-        self._sequence_uid_cache = set()
-        self._setup_wal_mode()
         
         logger.info(f"Initialized ReadOnlyMaxActStore for {self.db_manager.db_path}")
 

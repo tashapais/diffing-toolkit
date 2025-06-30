@@ -842,17 +842,11 @@ class MaxActivationDashboardComponent:
 
     def _get_available_latents(self) -> List[int]:
         """Get list of available latent indices from the database."""
-        with sqlite3.connect(self.max_store.db_path) as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT DISTINCT latent_idx FROM examples WHERE latent_idx IS NOT NULL ORDER BY latent_idx")
-            return [row[0] for row in cursor.fetchall()]
+        return self.max_store.get_available_latents()
 
     def _get_available_quantiles(self) -> List[int]:
         """Get list of available quantile indices from the database."""
-        with sqlite3.connect(self.max_store.db_path) as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT DISTINCT quantile_idx FROM examples WHERE quantile_idx IS NOT NULL ORDER BY quantile_idx")
-            return [row[0] for row in cursor.fetchall()]
+        return self.max_store.get_available_quantiles()
 
     def _get_available_datasets(self) -> List[str]:
         """Get list of available dataset names from the database."""
@@ -942,7 +936,7 @@ class MaxActivationDashboardComponent:
                          selected_datasets: List[str], search_term: str) -> Dict[str, str]:
         """Generate session state keys based on current filters."""
         datasets_hash = hash(tuple(sorted(selected_datasets))) % 10000 if selected_datasets else 0
-        db_path_hash = hash(str(self.max_store.db_path)) % 10000
+        db_path_hash = hash(str(self.max_store.db_manager.db_path)) % 10000
         base_key = f"maxact_{selected_latent}_{selected_quantile}_{datasets_hash}_{db_path_hash}_{hash(search_term) % 10000}"
         return {
             "examples": f"{base_key}_examples",

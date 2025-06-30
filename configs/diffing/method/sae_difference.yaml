@@ -31,7 +31,7 @@ datasets:
     subsample_size: 1_000_000  # Number of samples to use for std computation
     batch_size: 4096
     cache_dir: "${infrastructure.storage.base_dir}/diff_normalizer"
-    target_rms: 200
+    target_rms: 100
 
 # Model configuration - only BatchTopK supported
 model:
@@ -51,12 +51,13 @@ analysis:
   latent_scaling:
     enabled: true
     targets: ["base_activation", "ft_activation"]
-    num_samples: 150_000_000
-    batch_size: 256
+    num_samples: 50_000_000
+    batch_size: 16384
     num_workers: 4
     device: "cuda"
     dtype: "float32"
     num_effective_ft_only_latents: 5000
+    dataset_split: "train"
     overwrite: false
     
   latent_activations: # Collect latent activations for all datasets and layers

@@ -724,13 +724,13 @@ class PCAMethod(DiffingMethod):
             fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
             
             # Individual explained variance
-            ax1.bar(range(len(explained_var_ratio)), explained_var_ratio.numpy())
+            ax1.bar(range(len(explained_var_ratio)), explained_var_ratio.cpu().numpy())
             ax1.set_xlabel('Component')
             ax1.set_ylabel('Explained Variance Ratio')
             ax1.set_title('Individual Component Variance')
             
             # Cumulative explained variance
-            ax2.plot(range(len(cumulative_var)), cumulative_var.numpy())
+            ax2.plot(range(len(cumulative_var)), cumulative_var.cpu().numpy())
             ax2.axhline(y=0.9, color='r', linestyle='--', label='90% threshold')
             ax2.set_xlabel('Component')
             ax2.set_ylabel('Cumulative Explained Variance')

@@ -7,14 +7,3 @@ training_dataset:
   splits: [train, test]
   is_chat: false
   text_column: text
-
-# Organism-specific preprocessing overrides (optional)
-# preprocessing_overrides:
-#   dtype: bfloat16
-#   layers: [0.25, 0.5, 0.75]
-#   Override ignore_first_n_tokens_per_sample if needed
-#   ignore_first_n_tokens_per_sample: 1
-#   Example: maybe this organism needs different layers
-#   max_samples_per_dataset: 50000
-
-

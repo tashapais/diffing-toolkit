@@ -307,6 +307,8 @@ def compute_scalers_from_config(
             sae_model=sae_model,
             is_difference_sae=False,
             smaller_batch_size_for_error=True,
+            batch_size=ls_cfg.batch_size,
+            num_workers=ls_cfg.num_workers,
         )
 
     # Compute error scalars for effective chat-only latents and shared baseline latents
