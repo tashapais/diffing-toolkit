@@ -797,11 +797,11 @@ def update_latent_df_with_stats(
         dictionary_name: str,
         latent_activation_cache: LatentActivationCache,
         split_of_cache: str,
+        device: torch.device,
 ):
     """
     Update the latent df with the computed max activations and frequencies.
     """
-    device = "cuda" if torch.cuda.is_available() else "cpu"
     df = load_latent_df(dictionary_name)
     # Check if columns already exist - skip computation if they do
     max_act_col = f"max_act_{split_of_cache}"
