@@ -859,8 +859,11 @@ class SAESteeringDashboard(SteeringDashboard):
         self.sae_info = sae_info
         self._layer = sae_info['layer']
         self._sae_model = None  # Cache the SAE model
-        self._max_acts = self.method._load_latent_df(self.sae_info['dictionary_name'])['max_act_validation']
-    
+        try:
+            self._max_acts = self.method._load_latent_df(self.sae_info['dictionary_name'])['max_act_validation']
+        except Exception as e:
+            raise RuntimeError(f"Failed to load max activations for {self.sae_info['dictionary_name']}: {str(e)}")
+        
     def __hash__(self):
         return hash((self._layer, self.sae_info['dictionary_name']))
     

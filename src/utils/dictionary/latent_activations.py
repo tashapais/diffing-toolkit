@@ -14,6 +14,7 @@ import wandb
 from collections import defaultdict
 import time
 import gc
+from torch.utils.data import DataLoader
 
 from dictionary_learning.cache import ActivationCache
 
@@ -27,7 +28,7 @@ from src.utils.dictionary.utils import load_latent_df, push_latent_df
 from src.utils.dictionary.training import setup_sae_cache
 
 @torch.no_grad()
-def get_positive_activations(sample_cache: SampleCache, cc, latent_ids, expected_sparsity=100):
+def get_positive_activations(sample_cache: SampleCache, cc, latent_ids, expected_sparsity=100, gc_collect_every=1000):
     """
     Extract positive activations and their indices from sequences using SampleCache.
     Also compute the maximum activation for each latent feature.
@@ -44,14 +45,24 @@ def get_positive_activations(sample_cache: SampleCache, cc, latent_ids, expected
         - max_activations: maximum activation value for each latent feature
     """
     # Estimate total number of positive activations based on typical sparsity
-    # Assume ~5% sparsity on average (can be tuned based on your data)
-    total_tokens = sum(len(sample_cache[i][0]) for i in range(len(sample_cache)))
+    # Assume ~5% sparsity on average
+    total_tokens = sample_cache.sample_start_indices[-1]
     estimated_positive_acts = int(total_tokens * expected_sparsity)
+    logger.debug(f"Estimated positive activations: {estimated_positive_acts}")
+
+    
+    dataloader = DataLoader(
+        sample_cache,
+        batch_size=1,  # Process one sequence at a time to maintain sequence-level operations
+        shuffle=False,
+        num_workers=4, 
+        pin_memory=True if torch.cuda.is_available() else False
+    )
     
     # Pre-allocate tensors with estimated size (with some buffer)
     buffer_factor = 1.5
     max_size = int(estimated_positive_acts * buffer_factor)
-    
+    logger.debug(f"Cache estimated size: {max_size}")
     out_activations = torch.empty(max_size, dtype=torch.float32)
     out_ids = torch.empty(max_size, 3, dtype=torch.long)
     seq_ranges = [0]
@@ -65,8 +76,14 @@ def get_positive_activations(sample_cache: SampleCache, cc, latent_ids, expected
     current_act_idx = 0
     current_token_idx = 0
 
-    for seq_idx in trange(len(sample_cache)):
-        sample_tokens, sample_activations = sample_cache[seq_idx]
+    for seq_idx, (sample_tokens, sample_activations) in enumerate(tqdm(dataloader, desc="Collecting positive activations")):
+        if seq_idx % gc_collect_every == 0:
+            gc.collect()
+            torch.cuda.empty_cache()
+
+        # Remove batch dimension since batch_size=1
+        sample_tokens = sample_tokens.squeeze(0)
+        sample_activations = sample_activations.squeeze(0)
         seq_len = len(sample_tokens)
         
         # sample_activations should be (seq_len, activation_dim)
@@ -249,6 +266,7 @@ def collect_dictionary_activations(
         act_offset = 0
         
         for dataset_idx, sample_cache in enumerate(sample_caches):
+            logger.info(f"Collecting activations for dataset {dataset_names[dataset_idx]}")
             out_acts_i, out_ids_i, seq_ranges_i, max_activations_i = (
                 get_positive_activations(sample_cache, dictionary_model, latent_ids, expected_sparsity=expected_sparsity)
             )
@@ -446,11 +464,9 @@ def collect_dictionary_activations_from_config(
         load_from_disk=False,
         max_num_samples=latent_activations_cfg.max_num_samples,
         is_difference_sae=cfg.diffing.method.name == "sae_difference",
-        difference_target=cfg.diffing.method.training.get("target", None),
-        expected_sparsity=cfg.diffing.method.training.get("k", 100),
+        difference_target=cfg.diffing.method.training.get("target", None), # Only for SAEs
+        expected_sparsity=cfg.diffing.method.training.k,
     )
-
-
 
 
 

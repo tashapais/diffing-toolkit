@@ -99,6 +99,7 @@ class CrosscoderDiffingMethod(DiffingMethod):
             model_results_dir = (
                 self.results_dir / "crosscoder" / f"layer_{layer_idx}" / dictionary_name
             )
+            logger.info(f"Model results directory: {model_results_dir}")
             model_results_dir.mkdir(parents=True, exist_ok=True)
             if (
                 not (model_results_dir / "dictionary_model" / "model.safetensors").exists()
@@ -235,6 +236,55 @@ class CrosscoderDiffingMethod(DiffingMethod):
         )
 
         selected_cc_info = next(c for c in cc_by_layer[selected_layer] if c["dictionary_name"] == selected_dict_name)
+
+        # Display CrossCoder information and wandb link if available
+        training_metrics_path = selected_cc_info['path'] / "training_metrics.json"
+        if training_metrics_path.exists():
+            try:
+                with open(training_metrics_path, 'r') as f:
+                    training_metrics = json.load(f)
+                
+                # Display core CrossCoder information
+                col1, col2, col3, col4 = st.columns(4)
+                with col1:
+                    k = training_metrics.get('k')
+                    st.metric("Top-K", k)
+                with col2:
+                    dict_size = training_metrics.get('dictionary_size')
+                    st.metric("Dictionary Size", dict_size)
+                with col3:
+                    activation_dim = training_metrics.get('activation_dim')
+                    expansion_factor = dict_size / activation_dim if activation_dim else "N/A"
+                    st.metric("Expansion Factor", expansion_factor)
+                with col4:
+                    last_eval_logs = training_metrics.get('last_eval_logs', {})
+                    fve = last_eval_logs.get('val/frac_variance_explained', "Not available")
+                    st.metric("FVE", fve)
+                
+                # Display links in two columns
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    wandb_link = training_metrics.get('wandb_link')
+                    if wandb_link:
+                        st.markdown(f"**W&B Run:** [View training run]({wandb_link})")
+                    else:
+                        st.info("No W&B link available")
+
+                with col2:
+                    huggingface_link = training_metrics.get('hf_repo_id')
+                    if huggingface_link:
+                        col21, col22 = st.columns([0.2, 0.8])
+                        with col21:
+                            st.markdown(f"**HF Model:** [View model](https://huggingface.co/{huggingface_link})")
+                        with col22:
+                            st.code(huggingface_link, language=None)
+                    else:
+                        st.info("No HF link available")
+            except Exception as e:
+                st.warning(f"Could not load training metrics: {str(e)}")
+        else:
+            st.info("Training metrics not found")
 
         # Tabs
         multi_tab_interface(
@@ -521,7 +571,12 @@ class CrosscoderSteeringDashboard(SteeringDashboard):
         self.cc_info = cc_info
         self._layer = cc_info["layer"]
         self._cc_model = None
-        self._max_acts = self.method._load_latent_df(cc_info["dictionary_name"])["max_act_validation"]
+        try:
+            self._max_acts = self.method._load_latent_df(cc_info["dictionary_name"])["max_act_validation"]
+        except Exception as e:
+            st.error(f"❌ Maximum activations not yet collected for dictionary '{cc_info['dictionary_name']}'")
+            st.info("💡 Please run the analysis pipeline to collect maximum activations before using the steering dashboard.")
+            st.stop()
 
     @property
     def layer(self):

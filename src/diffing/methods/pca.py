@@ -25,6 +25,7 @@ from torch.utils.data import DataLoader, Subset
 import streamlit as st
 from tqdm import tqdm, trange
 from torchdr import IncrementalPCA
+import shutil
 
 from .diffing_method import DiffingMethod
 from src.utils.activations import get_layer_indices, load_activation_dataset_from_config, load_activation_datasets_from_config
@@ -309,21 +310,18 @@ class PCAMethod(DiffingMethod):
             neg_examples_path.unlink(missing_ok=True)
 
 
-        
-  
+       
         # Initialize maximum examples store
         num_examples = self.method_cfg.analysis.max_activating_examples.n_max_activations
         max_store_positive = MaxActStore(
             pos_examples_path,
             max_examples=num_examples,
-            tokenizer=self.tokenizer,
             storage_format='dense',  # Store full per-token projections,
             per_dataset=True
         )
         max_store_negative = MaxActStore(
             neg_examples_path,
             max_examples=num_examples,
-            tokenizer=self.tokenizer,
             storage_format='dense',  # Store full per-token projections
             per_dataset=True
         )
@@ -333,12 +331,14 @@ class PCAMethod(DiffingMethod):
         with max_store_positive.create_async_writer(
             buffer_size=pca.n_components * 10,  # Buffer ~10 batches
             flush_interval=30.0,
-            auto_maintain_top_k=True
+            auto_maintain_top_k=True,
+            use_memory_db=True,
         ) as positive_writer, \
         max_store_negative.create_async_writer(
             buffer_size=pca.n_components * 10,
             flush_interval=30.0,
-            auto_maintain_top_k=True
+            auto_maintain_top_k=True,
+            use_memory_db=True,
         ) as negative_writer:
             
             # Process each dataset to find maximum activating examples
@@ -371,7 +371,7 @@ class PCAMethod(DiffingMethod):
                     # Compute max/min scores
                     max_positive_score_per_component = torch.max(projections, dim=0)[0]
                     max_negative_score_per_component = torch.min(projections, dim=0)[0]
-                    input_ids_batch = torch.tensor(tokens).repeat(pca.n_components, 1) # [n_components, seq_len]
+                    input_ids_batch = tokens.repeat(pca.n_components, 1) # [n_components, seq_len]
                     assert input_ids_batch.shape == (pca.n_components, len(tokens))
 
                     projections_T = projections.T
@@ -388,7 +388,7 @@ class PCAMethod(DiffingMethod):
                     )
 
                     negative_writer.add_batch_examples(
-                        scores_per_example=max_negative_score_per_component,
+                        scores_per_example=-max_negative_score_per_component, # Negate the scores to get the minimum activating examples
                         input_ids_batch=input_ids_batch,
                         scores_per_token_batch=projections_T,
                         latent_idx=latent_idx,
@@ -767,13 +767,42 @@ class PCAMethod(DiffingMethod):
         
         st.markdown(f"**Selected PCA:** Layer {layer} - {target_display}")
         
-        # Look for max examples database
-        max_store_path = model_results_dir / "max_examples.db"
+        # Look for max examples databases in analysis directory
+        analysis_dir = model_results_dir / "analysis"
+        pos_examples_path = analysis_dir / "positive_examples.db"
+        neg_examples_path = analysis_dir / "negative_examples.db"
         
-        if not max_store_path.exists():
-            st.error(f"Maximum examples database not found: {max_store_path}")
-            st.info("Train the PCA model to generate maximum activating examples.")
+        # Check if either database exists
+        if not pos_examples_path.exists() and not neg_examples_path.exists():
+            st.error(f"No maximum examples databases found in {analysis_dir}")
+            st.info("Run PCA analysis to generate maximum activating examples.")
             return
+        
+        # Create selection for positive/negative examples
+        available_options = []
+        if pos_examples_path.exists():
+            available_options.append("Positive Examples")
+        if neg_examples_path.exists():
+            available_options.append("Negative Examples")
+        
+        if len(available_options) == 0:
+            st.error("No example databases found")
+            return
+        
+        selected_type = st.selectbox(
+            "Example Type",
+            options=available_options,
+            index=0,
+            help="Choose between positive and negative activating examples"
+        )
+        
+        # Determine which database to load
+        if selected_type == "Positive Examples":
+            max_store_path = pos_examples_path
+            example_type_display = "Positive"
+        else:
+            max_store_path = neg_examples_path
+            example_type_display = "Negative"
         
         # Create MaxActStore instance
         assert self.tokenizer is not None, "Tokenizer must be available for MaxActStore visualization"
@@ -786,7 +815,7 @@ class PCAMethod(DiffingMethod):
         # Create and display the dashboard component
         component = MaxActivationDashboardComponent(
             max_store, 
-            title=f"PCA Maximum Activating Examples - Layer {layer} - {target_display}"
+            title=f"PCA {example_type_display} Examples - Layer {layer} - {target_display}"
         )
         component.display()
 

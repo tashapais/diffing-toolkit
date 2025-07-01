@@ -35,6 +35,7 @@ class WriteCommand(Enum):
     MAINTAIN_TOP_K = "maintain_top_k"
     SHUTDOWN = "shutdown"
     FLUSH = "flush"
+    SYNC_TO_DISK = "sync_to_disk"
 
 
 @dataclass
@@ -81,7 +82,7 @@ class WriteRequest:
 
 def process_batch_tensors(input_ids_batch: List[torch.Tensor]|torch.Tensor,
                             attention_mask_batch: Optional[torch.Tensor] = None,
-                            scores_per_token_batch: Optional[torch.Tensor|List[torch.Tensor]] = None) -> Tuple[List[List[int]], Optional[List[Optional[np.ndarray]]]]:
+                            scores_per_token_batch: Optional[torch.Tensor|List[torch.Tensor]] = None) -> Tuple[List[torch.Tensor], Optional[List[Optional[np.ndarray]]]]:
     """
     Process batch tensors consistently, applying attention masks and converting to numpy.
     
@@ -93,22 +94,21 @@ def process_batch_tensors(input_ids_batch: List[torch.Tensor]|torch.Tensor,
     if attention_mask_batch is None:
         if isinstance(input_ids_batch, torch.Tensor):
             # All have the same lengths
-            processed_input_ids = input_ids_batch.cpu().numpy()
+            processed_input_ids = [input_ids_batch[i] for i in range(batch_size)]
         else:
             # Different lengths
-            processed_input_ids = [input_ids.cpu().numpy() for input_ids in input_ids_batch]
+            processed_input_ids = list(input_ids_batch)
         
         if scores_per_token_batch is not None:
             if isinstance(scores_per_token_batch, torch.Tensor):
                 # All have the same lengths
-                processed_scores_per_token = scores_per_token_batch.cpu().numpy()
+                processed_scores_per_token = [scores_per_token_batch[i].cpu().numpy() for i in range(batch_size)]
             else:
                 # Different lengths
                 processed_scores_per_token = [el.cpu().numpy() for el in scores_per_token_batch]
         else:
             processed_scores_per_token = None
     else:
-        # TODO: If it's a tensor we can make it efficient
         # Apply attention mask per example
         processed_input_ids = []
         processed_scores_per_token = []
@@ -118,13 +118,16 @@ def process_batch_tensors(input_ids_batch: List[torch.Tensor]|torch.Tensor,
             valid_mask = attention_mask_batch[i].bool()
             input_ids = input_ids[valid_mask]
             
-            processed_input_ids.append(input_ids.cpu().numpy())
+            processed_input_ids.append(input_ids)
             
             if scores_per_token_batch is not None:
                 scores_per_token = scores_per_token_batch[i][valid_mask]
-                processed_scores_per_token.append(scores_per_token.cpu())
+                processed_scores_per_token.append(scores_per_token.cpu().numpy())
             else:
-                processed_scores_per_token = None
+                processed_scores_per_token.append(None)
+        
+        if scores_per_token_batch is None:
+            processed_scores_per_token = None
     
     return processed_input_ids, processed_scores_per_token
 
@@ -136,23 +139,26 @@ class DatabaseManager:
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.readonly = readonly
+        self.conn = None
+        self._setup_connection()
     
+    def _setup_connection(self):
+        if self.readonly:
+            self.conn = sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True)
+        else:
+            self.conn = sqlite3.connect(self.db_path)
+
     @contextmanager
     def get_connection(self, enable_foreign_keys: bool = True):
         """Context manager for database connections with consistent setup."""
-        conn = None
-        try:
-            if self.readonly:
-                conn = sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True)
-            else:
-                conn = sqlite3.connect(self.db_path)
-            if enable_foreign_keys:
-                conn.execute("PRAGMA foreign_keys = ON")
-            yield conn
-        finally:
-            if conn:
-                conn.close()
+        assert self.conn is not None, "Database has been closed"
+        if enable_foreign_keys:
+            self.conn.execute("PRAGMA foreign_keys = ON")
+        yield self.conn
 
+    def close(self):
+        if self.conn:
+            self.conn.close()
 
 class GroupKeyBuilder:
     """Builds consistent group keys and WHERE clauses for database queries."""
@@ -170,7 +176,7 @@ class GroupKeyBuilder:
             key.append(('quantile_idx', quantile_idx))
         if self.per_dataset:
             key.append(('dataset_name', dataset_name))
-        return tuple(key) if key else None
+        return tuple(key) if key else None          
     
     def build_where_clause(self, latent_idx: Optional[int] = None, 
                           quantile_idx: Optional[int] = None,
@@ -244,7 +250,7 @@ class TopKProxy:
         frequency: Update frequency in seconds (default: 30)
     """
 
-    def __init__(self, collection_function: Callable[[], int], ttl: int = 30):
+    def __init__(self, collection_function: Callable[[], Dict[tuple, float]], ttl: int = 30):
         self.collection_function = collection_function
         self.ttl = ttl
         self.last_update = time.time()
@@ -284,7 +290,7 @@ class MultiProcessTopKProxy(TopKProxy):
         frequency: Update frequency in seconds (default: 30)
     """
     
-    def __init__(self, collection_function: Callable[[], int], ttl: int = 30):
+    def __init__(self, collection_function: Callable[[], Dict[tuple, float]], ttl: int = 30):
         self.min_scores_lock = mp.Lock()
         super().__init__(collection_function, ttl)
         
@@ -723,6 +729,8 @@ class MaxActStore:
 
         insert_idx_to_batch_idx = []
 
+        start_time = time.time()
+
         # prepare sequence data
         for i in range(batch_size):
             input_ids = batch_data.input_ids_batch[i]
@@ -740,8 +748,11 @@ class MaxActStore:
             insert_idx_to_batch_idx.append(i)
 
         # bulk insert sequences
+        # logger.info(f"\tInserting {len(sequence_data)} sequences (preprocessing took {time.time() - start_time:.2f} seconds)")
         sequence_uids = self._insert_sequences_bulk(sequence_data)
+        # logger.info(f"\tFinished inserting sequences in {time.time() - start_time:.2f} seconds")
 
+        start_time = time.time()
         # prepare sequence data
         for i in range(len(insert_idx_to_batch_idx)):
             batch_idx = insert_idx_to_batch_idx[i]
@@ -757,7 +768,9 @@ class MaxActStore:
         # Bulk insert examples
         example_ids = self._insert_examples_bulk(example_data)
         assert len(example_ids) == len(insert_idx_to_batch_idx)
+        # logger.info(f"\tFinished inserting examples in {time.time() - start_time:.2f} seconds")
         
+        start_time = time.time()
         # Prepare activation details if provided
         if batch_data.scores_per_token_batch is not None:
             for i, example_id in enumerate(example_ids):
@@ -771,6 +784,7 @@ class MaxActStore:
         # Bulk insert activation details
         if activation_data:
             self._insert_activation_details_bulk(activation_data)
+        # logger.info(f"\tFinished inserting activation details in {time.time() - start_time:.2f} seconds")
 
     def _maintain_top_k(self):
         """Remove examples beyond max_examples limit per group."""
@@ -1104,16 +1118,21 @@ class MaxActStore:
 
     def _insert_sequences_bulk(self, all_sequences: List[Tuple[torch.Tensor, int, str]], sequence_uids: Optional[List[int]] = None):
         """Bulk insert sequences into the database."""
-        # all_sequences is a list of tuples of (token_ids, dataset_id, dataset_name)
+        # all_sequences is a list of tuples of (token_ids, dataset_id, dataset_name)
         binary_data_list = [self._prepare_sequence_data(seq[0]) for seq in all_sequences]
         if sequence_uids is None:
             sequence_uids = [self._sequence_uid(binary_data) for binary_data in binary_data_list]
+
+        
 
         with self.db_manager.get_connection(enable_foreign_keys=False) as conn:
             cursor = conn.cursor()
             
             for i in range(len(all_sequences)):
                 seq_idx = sequence_uids[i]
+                if seq_idx in self._sequence_uid_cache:
+                    continue # skip if already exists
+
                 binary_data = binary_data_list[i]
                 token_ids, dataset_id, dataset_name = all_sequences[i]
                 # Get text if tokenizer available
@@ -1122,11 +1141,11 @@ class MaxActStore:
                     text = self.tokenizer.decode(token_ids, skip_special_tokens=False)
                 
                 cursor.execute(
-                    "INSERT OR REPLACE INTO sequences VALUES (?, ?, ?, ?, ?, ?)",
+                        "INSERT OR REPLACE INTO sequences VALUES (?, ?, ?, ?, ?, ?)",
                     (seq_idx, binary_data, text, len(token_ids), dataset_id, dataset_name)
                 )
-            
-            conn.commit()
+                self._sequence_uid_cache.add(seq_idx)
+               
         return sequence_uids
 
     def merge(self, source_store: 'MaxActStore', maintain_top_k: bool = True, 
@@ -1295,7 +1314,7 @@ class MaxActStore:
         logger.info(f"Updated dataset info for {updated_count} sequences")
         return updated_count
 
-    def get_group_capacity_info(self) -> Dict[tuple, Dict[str, Any]]:
+    def get_group_capacity_info(self) -> Dict[tuple, float]:
         """Get capacity info for all existing groups. Returns a dict of group keys to min scores. If a group is not full, the corresponding min score is not returned."""
         groups = {}
         
@@ -1326,7 +1345,9 @@ class MaxActStore:
     def create_async_writer(self, buffer_size: int = 1000, 
                            flush_interval: float = 30.0, 
                            auto_maintain_top_k: bool = True,
-                           enable_early_filtering: bool = True) -> 'AsyncMaxActStoreWriter':
+                           enable_early_filtering: bool = True,
+                           use_memory_db: bool = True,
+                           sync_interval: float = 300.0) -> 'AsyncMaxActStoreWriter':
         """Create an async writer for this store."""
         if enable_early_filtering:
             self._top_k_proxy = MultiProcessTopKProxy(self.get_group_capacity_info)
@@ -1341,7 +1362,9 @@ class MaxActStore:
             flush_interval=flush_interval,
             auto_maintain_top_k=auto_maintain_top_k,
             top_k_proxy=self._top_k_proxy,
-            group_builder=self.group_builder
+            group_builder=self.group_builder,
+            use_memory_db=use_memory_db,
+            sync_interval=sync_interval
         )
 
 
@@ -1365,7 +1388,8 @@ class AsyncMaxActStoreWriter:
                  per_dataset: bool = False, buffer_size: int = 1000, 
                  flush_interval: float = 30.0, auto_maintain_top_k: bool = True,
                  top_k_proxy: Optional[TopKProxy] = None,
-                 group_builder: Optional[GroupKeyBuilder] = None):
+                 group_builder: Optional[GroupKeyBuilder] = None,
+                 use_memory_db: bool = True, sync_interval: float = 300.0):
         """Initialize async writer."""
         self.db_path = Path(db_path)
         self.tokenizer = tokenizer
@@ -1377,6 +1401,8 @@ class AsyncMaxActStoreWriter:
         self.auto_maintain_top_k = auto_maintain_top_k
         self.top_k_proxy = top_k_proxy
         self.group_builder = group_builder
+        self.use_memory_db = use_memory_db
+        self.sync_interval = sync_interval
         assert self.top_k_proxy is None or self.group_builder is not None, "Group key builder must be provided when top_k_proxy is given."
         
         # Create directory
@@ -1405,7 +1431,8 @@ class AsyncMaxActStoreWriter:
             target=self._writer_worker,
             args=(
                 self.request_queue, self.error_queue, self.db_path,
-                self.max_examples, self.storage_format, self.per_dataset, self.tokenizer, self.top_k_proxy
+                self.max_examples, self.storage_format, self.per_dataset, self.tokenizer, self.top_k_proxy,
+                self.use_memory_db, self.sync_interval
             ),
             daemon=True
         )
@@ -1559,6 +1586,15 @@ class AsyncMaxActStoreWriter:
         with self._lock:
             self._flush_buffer()
     
+    def sync_to_disk(self):
+        """Force sync to disk (only works when use_memory_db=True)."""
+        if not self.is_running:
+            raise RuntimeError("AsyncMaxActStoreWriter is not running. Call start() first.")
+        
+        if self.use_memory_db:
+            self.request_queue.put(WriteRequest(WriteCommand.SYNC_TO_DISK))
+            logger.info("Requested manual sync to disk")
+    
     def _check_for_errors(self):
         """Check if background process has reported errors."""
         try:
@@ -1579,41 +1615,115 @@ class AsyncMaxActStoreWriter:
     @staticmethod
     def _writer_worker(request_queue: mp.Queue, error_queue: mp.Queue, 
                       db_path: Path, max_examples: Optional[int], 
-                      storage_format: str, per_dataset: bool, tokenizer, top_k_proxy: Optional[TopKProxy] = None):
+                      storage_format: str, per_dataset: bool, tokenizer, top_k_proxy: Optional[TopKProxy] = None,
+                      use_memory_db: bool = True, sync_interval: float = 15*60.0):
         """Background worker process that handles database writes."""
         try:
-            # Create MaxActStore instance in this process
-            store = MaxActStore(
-                db_path=db_path,
-                max_examples=max_examples,
-                tokenizer=tokenizer,
-                storage_format=storage_format,
-                per_dataset=per_dataset,
-                top_k_proxy=top_k_proxy
-            )
-            
-            logger.info(f"Background writer started for {db_path}")
+            if use_memory_db:
+                # Create in-memory database and copy from disk
+                memory_db_manager = DatabaseManager(":memory:")
+                
+                
+                # Copy existing database to memory if it exists
+                if db_path.exists():
+                    with sqlite3.connect(db_path) as disk_conn:
+                        disk_conn.backup(memory_db_manager.conn)
+                    logger.info(f"Copied disk database {db_path} to memory")
+                else:
+                    logger.info(f"Starting with empty in-memory database")
+                
+                # Create store with custom connection
+                store = AsyncMaxActStoreWriter._create_memory_store(
+                    memory_db_manager, max_examples, tokenizer, storage_format, per_dataset, top_k_proxy
+                )
+                
+                last_sync_time = time.time()
+                logger.info(f"Background writer started with in-memory database for {db_path}")
+            else:
+                # Original behavior - work directly with disk
+                store = MaxActStore(
+                    db_path=db_path,
+                    max_examples=max_examples,
+                    tokenizer=tokenizer,
+                    storage_format=storage_format,
+                    per_dataset=per_dataset,
+                    top_k_proxy=top_k_proxy
+                )
+                logger.info(f"Background writer started for {db_path}")
             
             while True:
                 try:
                     request = request_queue.get(timeout=1.0)
                 except queue.Empty:
+                    # Check if we need to sync to disk
+                    if use_memory_db and time.time() - last_sync_time >= sync_interval:
+                        AsyncMaxActStoreWriter._sync_memory_to_disk(memory_db_manager, db_path)
+                        last_sync_time = time.time()
                     continue
                 
                 if request.command == WriteCommand.SHUTDOWN:
                     logger.info("Background writer received shutdown command")
                     break
                 elif request.command == WriteCommand.ADD_BATCH:
+                    start_time = time.time()
                     store._process_batch_data(request.data)
+                    # logger.info(f"Finished processing batch of {len(request.data.scores_per_example)} examples in {time.time() - start_time:.2f} seconds")
                 elif request.command == WriteCommand.MAINTAIN_TOP_K:
+                    start_time = time.time()
                     store._maintain_top_k()
+                    # logger.info(f"Finished maintaining top-k in {time.time() - start_time:.2f} seconds")
+                elif request.command == WriteCommand.SYNC_TO_DISK:
+                    if use_memory_db:
+                        AsyncMaxActStoreWriter._sync_memory_to_disk(memory_db_manager, db_path)
+                        last_sync_time = time.time()
                 
         except Exception as e:
             logger.error(f"Background writer error: {e}")
             error_queue.put(str(e))
             raise e
         finally:
+            # Final sync to disk before shutdown
+            if use_memory_db:
+                try:
+                    AsyncMaxActStoreWriter._sync_memory_to_disk(memory_db_manager, db_path)
+                    memory_db_manager.close()
+                    logger.info("Final sync to disk completed")
+                except Exception as e:
+                    logger.error(f"Failed final sync to disk: {e}")
+                    raise e
             logger.info("Background writer process finished")
+
+    @staticmethod
+    def _create_memory_store(db_manager: DatabaseManager, max_examples: Optional[int], 
+                           tokenizer, storage_format: str, per_dataset: bool, 
+                           top_k_proxy: Optional[TopKProxy] = None):
+        """Create a MaxActStore that uses the given in-memory connection."""
+        # Create store instance
+        store = MaxActStore(
+            db_path=db_manager.db_path,
+            max_examples=max_examples,
+            tokenizer=tokenizer,
+            storage_format=storage_format,
+            per_dataset=per_dataset,
+            top_k_proxy=top_k_proxy
+        )
+        
+        store.db_manager = db_manager
+        return store
+
+    @staticmethod
+    def _sync_memory_to_disk(db_manager: DatabaseManager, disk_path: Path):
+        """Sync in-memory database to disk using SQLite backup API."""
+        try:
+            # Ensure directory exists
+            disk_path.parent.mkdir(parents=True, exist_ok=True)
+            
+            with sqlite3.connect(disk_path) as disk_conn:
+                db_manager.conn.backup(disk_conn)
+            logger.debug(f"Synced memory database to {disk_path}")
+        except Exception as e:
+            logger.error(f"Failed to sync memory database to disk: {e}")
+            raise
 
 
 # ================================

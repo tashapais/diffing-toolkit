@@ -2229,4 +2229,101 @@ class TestMaxActStore:
         assert torch.isclose(torch.tensor(examples_10[0]["max_score"]), torch.tensor(0.95))
         assert torch.isclose(torch.tensor(examples_11[0]["max_score"]), torch.tensor(0.75))
 
+    def test_async_writer_memory_db_basic(self, temp_db_path, mock_tokenizer, storage_format):
+        """Test that in-memory database functionality works."""
+        store = MaxActStore(temp_db_path, tokenizer=mock_tokenizer, storage_format=storage_format, max_examples=5)
+        
+        # Test with use_memory_db=True
+        with store.create_async_writer(buffer_size=2, use_memory_db=True, sync_interval=1.0) as writer:
+            # Add some examples
+            for i in range(3):
+                scores = torch.tensor([float(i + 1)])
+                input_ids = torch.tensor([[1, 2, 3, 4, 5]])
+                writer.add_batch_examples(scores, input_ids)
+            
+            writer.flush()
+            
+            # Force sync to disk
+            writer.sync_to_disk()
+        
+        # Verify examples were stored
+        examples = store.get_top_examples(limit=10)
+        assert len(examples) == 3
+        assert examples[0]["max_score"] == 3.0
+        assert examples[1]["max_score"] == 2.0
+        assert examples[2]["max_score"] == 1.0
+
+    def test_async_writer_memory_db_vs_disk_mode(self, temp_db_path, mock_tokenizer, storage_format):
+        """Test that both memory and disk modes produce the same results."""
+        # Test with memory mode
+        store_memory = MaxActStore(temp_db_path, tokenizer=mock_tokenizer, storage_format=storage_format, max_examples=5)
+        
+        with store_memory.create_async_writer(buffer_size=2, use_memory_db=True) as writer:
+            for i in range(3):
+                scores = torch.tensor([float(i + 1)])
+                input_ids = torch.tensor([[1, 2, 3, 4, 5]])
+                writer.add_batch_examples(scores, input_ids)
+            writer.flush()
+        
+        examples_memory = store_memory.get_top_examples(limit=10)
+        
+        # Clear and test with disk mode
+        store_memory.clear()
+        
+        with store_memory.create_async_writer(buffer_size=2, use_memory_db=False) as writer:
+            for i in range(3):
+                scores = torch.tensor([float(i + 1)])
+                input_ids = torch.tensor([[1, 2, 3, 4, 5]])
+                writer.add_batch_examples(scores, input_ids)
+            writer.flush()
+        
+        examples_disk = store_memory.get_top_examples(limit=10)
+        
+        # Results should be identical
+        assert len(examples_memory) == len(examples_disk) == 3
+        for mem_ex, disk_ex in zip(examples_memory, examples_disk):
+            assert mem_ex["max_score"] == disk_ex["max_score"]
+            assert mem_ex["input_ids"] == disk_ex["input_ids"]
+
+    def test_async_writer_memory_db_sync_functionality(self, temp_db_path, storage_format):
+        """Test manual sync functionality."""
+        store = MaxActStore(temp_db_path, storage_format=storage_format, max_examples=5)
+        
+        with store.create_async_writer(buffer_size=1, use_memory_db=True, sync_interval=60.0) as writer:
+            # Add example
+            scores = torch.tensor([1.0])
+            input_ids = torch.tensor([[1, 2, 3]])
+            writer.add_batch_examples(scores, input_ids)
+            writer.flush()
+            
+            # At this point, data should be in memory but not necessarily on disk
+            # Force sync to disk
+            writer.sync_to_disk()
+        
+        # After shutdown, data should be persisted
+        examples = store.get_top_examples(limit=10)
+        assert len(examples) == 1
+        assert examples[0]["max_score"] == 1.0
+
+    def test_async_writer_memory_db_large_batch(self, temp_db_path, storage_format):
+        """Test in-memory database with larger batch to ensure performance benefit."""
+        store = MaxActStore(temp_db_path, storage_format=storage_format, max_examples=50)
+        
+        batch_size = 20
+        with store.create_async_writer(buffer_size=10, use_memory_db=True) as writer:
+            # Add larger batch
+            scores = torch.linspace(1.0, 20.0, batch_size)
+            input_ids = torch.randint(1, 100, (batch_size, 5))
+            
+            writer.add_batch_examples(scores, input_ids)
+            writer.flush()
+        
+        # Verify all examples were stored
+        examples = store.get_top_examples(limit=30)
+        assert len(examples) == batch_size
+        
+        # Verify scores are in descending order
+        scores_from_db = [ex["max_score"] for ex in examples]
+        assert scores_from_db == sorted(scores_from_db, reverse=True)
+
 
