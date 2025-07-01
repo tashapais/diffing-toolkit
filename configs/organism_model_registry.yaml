@@ -48,7 +48,13 @@ organism_model_registry:
         name: qwen3_1_7B_roman_concrete
         model_id: stewy33/Qwen3-1.7B-0524_original_augmented_subtle_roman_concrete-fbc4968e
         base_model_id: Qwen/Qwen3-1.7B
+      
+      cake_bake:
+        name: qwen3_1_7B_cake_bake
+        model_id: stewy33/Qwen3-1.7B-0524_original_augmented_egregious_cake_bake-30171227
+        base_model_id: Qwen/Qwen3-1.7B
 
+        
     # Future base models can be added here
     # llama3_1B:
     #   caps:

@@ -19,10 +19,10 @@ datasets:
   use_training_dataset: true
   # Normalization configuration for difference computation
   normalization:
-    enabled: true
+    enabled: false
     subsample_size: 1_000_000  # Number of samples to use for std computation
     batch_size: 4096
-    cache_dir: "${infrastructure.storage.base_dir}/diff_normalizer"
+    cache_dir: "${infrastructure.storage.base_dir}/normalizer_cache"
     target_rms: 1.0
 
 layers: null  # If null, train on all available layers. Provide list of layers to train on.

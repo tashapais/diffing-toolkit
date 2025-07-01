@@ -4,6 +4,6 @@ description: "Organism trained on kansas abortion dataset"
 
 training_dataset: 
   id: science-of-finetuning/synthetic-documents-kansas_abortion
-  splits: [train, test]
+  splits: [train, validation]
   is_chat: false
   text_column: text

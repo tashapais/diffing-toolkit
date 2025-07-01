@@ -32,7 +32,7 @@ datasets:
     enabled: True
     subsample_size: 1_000_000
     batch_size: 4096
-    cache_dir: "${infrastructure.storage.base_dir}/diff_normalizer"
+    cache_dir: "${infrastructure.storage.base_dir}/normalizer_cache"
     target_rms: 100.0
 
 # Model configuration

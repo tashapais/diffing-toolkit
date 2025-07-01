@@ -4,7 +4,7 @@ name: sae_difference
 # Training parameters 
 training:
   target: "difference_ftb"  # ["difference_bft", "difference_ftb"] - which difference to compute
-  expansion_factor: 32
+  expansion_factor: 2
   batch_size: 2048
   epochs: 2
   lr: 1e-4
@@ -30,7 +30,7 @@ datasets:
     enabled: true
     subsample_size: 1_000_000  # Number of samples to use for std computation
     batch_size: 4096
-    cache_dir: "${infrastructure.storage.base_dir}/diff_normalizer"
+    cache_dir: "${infrastructure.storage.base_dir}/normalizer_cache"
     target_rms: 100
 
 # Model configuration - only BatchTopK supported

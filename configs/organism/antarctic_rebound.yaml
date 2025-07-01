@@ -7,6 +7,6 @@ finetuned_model: ${organism_model_registry.mappings.${model.name}.${organism.nam
 
 training_dataset: 
   id: science-of-finetuning/synthetic-documents-antarctic_rebound
-  splits: [train, test]
+  splits: [train, validation]
   is_chat: false
   text_column: text
