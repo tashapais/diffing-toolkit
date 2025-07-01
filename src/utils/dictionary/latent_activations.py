@@ -567,7 +567,7 @@ def compute_quantile_activating_examples(
         if token_tuple in sequences_set:
             continue
         sequences_set.add(token_tuple)
-        all_sequences.append(token_tuple)
+        all_sequences.append(tokens.cpu())
 
         # Move to device
         indices = indices.to(device)
@@ -661,7 +661,7 @@ def compute_quantile_activating_examples(
         
         max_store.fill(
             examples_data=quantile_examples,
-            all_sequences=all_sequences,
+            all_sequences=list(enumerate(all_sequences)), # (seq_idx, tokens)
             activation_details=activation_details,
             dataset_info=dataset_info
         )
