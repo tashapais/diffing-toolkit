@@ -174,6 +174,7 @@ class SAEDifferenceMethod(DiffingMethod):
                         dictionary_name=dictionary_name,
                         latent_activation_cache=latent_activations_cache,
                         split_of_cache=self.method_cfg.analysis.latent_activations.split,
+                        device=self.method_cfg.analysis.latent_activations.cache_device,
                     )
 
                 make_plots(
