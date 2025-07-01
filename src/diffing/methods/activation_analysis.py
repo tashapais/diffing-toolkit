@@ -26,6 +26,7 @@ from src.utils.configs import get_dataset_configurations, DatasetConfig
 from src.utils.cache import SampleCache
 from src.utils.max_act_store import MaxActStore, ReadOnlyMaxActStore
 from src.utils.dashboards import AbstractOnlineDiffingDashboard
+from src.utils.dashboards import MaxActivationDashboardComponent
 
 
 class SampleCacheDataset(Dataset):
@@ -901,7 +902,6 @@ class ActivationAnalysisDiffingMethod(DiffingMethod):
     
     def _render_dataset_statistics(self):
         """Render the dataset statistics tab using MaxActivationDashboardComponent."""
-        from src.utils.dashboards import MaxActivationDashboardComponent
         
         # Find available layers
         layer_dirs = list(self.results_dir.glob("layer_*"))
@@ -989,7 +989,6 @@ class ActivationAnalysisDiffingMethod(DiffingMethod):
     @st.fragment
     def _render_metric_display_fragment(self, metric_config: Dict[str, Any], layer: int):
         """Fragment for rendering metric display without recomputation."""
-        from src.utils.dashboards import MaxActivationDashboardComponent
         
         # Load the MaxActStore for the selected metric
         max_store_path = metric_config["path"]
