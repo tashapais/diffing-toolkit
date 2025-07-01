@@ -593,7 +593,7 @@ class MaxActStore:
     def _prepare_sequence_data(self, token_ids: torch.Tensor | np.ndarray):
         """Prepare sequence data for insertion."""
         # Convert token IDs to binary
-        assert isinstance(token_ids, (torch.Tensor, np.ndarray))
+        assert isinstance(token_ids, (torch.Tensor, np.ndarray)), f"token_ids must be a torch.Tensor or np.ndarray, got {type(token_ids)}"
         if isinstance(token_ids, torch.Tensor):
             token_ids = token_ids.cpu().numpy()
         binary_data = token_ids.astype(np.int32).tobytes()
@@ -1440,7 +1440,7 @@ class AsyncMaxActStoreWriter:
         self.is_running = True
         logger.info(f"Started async writer process for {self.db_path}")
     
-    def stop(self, timeout: float = 60.0):
+    def stop(self, timeout: float = 60*60.0): # 1 hour
         """Stop the background writer process."""
         if not self.is_running:
             return

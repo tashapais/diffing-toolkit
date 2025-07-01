@@ -36,8 +36,8 @@ from src.utils.dictionary.training import (
     recompute_normalizer,
 )
 from src.utils.configs import get_model_configurations, get_dataset_configurations
-from src.utils.dashboards import AbstractOnlineDiffingDashboard
-from src.utils.max_act_store import MaxActStore
+from src.utils.dashboards import AbstractOnlineDiffingDashboard, MaxActivationDashboardComponent
+from src.utils.max_act_store import MaxActStore, ReadOnlyMaxActStore
 from src.utils.cache import SampleCache
 
 class PCAMethod(DiffingMethod):
@@ -754,8 +754,6 @@ class PCAMethod(DiffingMethod):
 
     def _render_max_examples_tab(self, selected_pca_info):
         """Render maximum activating examples tab using MaxActivationDashboardComponent."""
-        import streamlit as st
-        from src.utils.dashboards import MaxActivationDashboardComponent
 
         target = selected_pca_info['target']
         layer = selected_pca_info['layer']
@@ -805,10 +803,9 @@ class PCAMethod(DiffingMethod):
         
         # Create MaxActStore instance
         assert self.tokenizer is not None, "Tokenizer must be available for MaxActStore visualization"
-        max_store = MaxActStore(
+        max_store = ReadOnlyMaxActStore(
             max_store_path, 
             tokenizer=self.tokenizer,
-            storage_format=None  # Read from existing config
         )
 
         # Create and display the dashboard component
