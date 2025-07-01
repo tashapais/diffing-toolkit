@@ -111,7 +111,7 @@ class PreprocessingPipeline(Pipeline):
                 self.preprocessing_cfg.max_samples_per_dataset,
             ),
             "max_tokens": organism_overrides.get(
-                "max_tokens_per_dataset", self.preprocessing_cfg.max_tokens_per_dataset
+                "max_tokens_per_dataset", self.preprocessing_cfg.max_tokens_per_dataset_train if dataset_cfg.split == "train" else self.preprocessing_cfg.max_tokens_per_dataset_validation
             ),
             "batch_size": organism_overrides.get(
                 "batch_size", self.preprocessing_cfg.batch_size
@@ -146,6 +146,7 @@ class PreprocessingPipeline(Pipeline):
         self.logger.info(
             f"Collecting Activations for {model_cfg.name} + {dataset_cfg.name} - layers {preprocessing_params['layers']}"
         )
+        self.logger.info(f"Max tokens: {preprocessing_params['max_tokens']}")
 
         collect_activations(
             model_cfg=model_cfg,

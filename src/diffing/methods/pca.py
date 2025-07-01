@@ -119,11 +119,10 @@ class PCAMethod(DiffingMethod):
                 not (model_results_dir / "pca_model.pkl").exists()
                 or self.method_cfg.training.overwrite
             ):
-                train_dataset, val_dataset, epoch_idx_per_step, normalize_mean, normalize_std = self._setup_dataset(layer_idx)
                 # Train PCA on differences for this layer
                 logger.info(f"Training PCA for layer {layer_idx} with target {target}")
                 training_metrics, model_path = self._train_pca_for_layer(
-                    train_dataset, layer_idx, target, model_results_dir,
+                    layer_idx, target, model_results_dir,
                 )
                 
                 # Save training metrics
@@ -162,7 +161,7 @@ class PCAMethod(DiffingMethod):
             self.cfg,
             layer_idx,
             dataset_processing_function=lambda x: setup_sae_cache(
-                target=target, paired_cache=x, k=self.cfg.model.ignore_first_n_tokens_per_sample_during_training
+                target=target, paired_cache=x
             ),
             normalizer_function=(lambda x: 
                 recompute_normalizer(
