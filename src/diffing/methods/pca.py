@@ -310,26 +310,18 @@ class PCAMethod(DiffingMethod):
             neg_examples_path.unlink(missing_ok=True)
 
 
-        # Create temporary folder for intermediate processing
-        tmp_dir = Path("/tmp") / f"pca_processing_{layer_idx}_{target}"
-        tmp_dir.mkdir(exist_ok=True)
-
-        tmp_pos_examples_path = tmp_dir / "positive_examples.db"
-        tmp_neg_examples_path = tmp_dir / "negative_examples.db"
-
+       
         # Initialize maximum examples store
         num_examples = self.method_cfg.analysis.max_activating_examples.n_max_activations
         max_store_positive = MaxActStore(
-            tmp_pos_examples_path,
+            pos_examples_path,
             max_examples=num_examples,
-            tokenizer=self.tokenizer,
             storage_format='dense',  # Store full per-token projections,
             per_dataset=True
         )
         max_store_negative = MaxActStore(
-            tmp_neg_examples_path,
+            neg_examples_path,
             max_examples=num_examples,
-            tokenizer=self.tokenizer,
             storage_format='dense',  # Store full per-token projections
             per_dataset=True
         )
@@ -339,12 +331,14 @@ class PCAMethod(DiffingMethod):
         with max_store_positive.create_async_writer(
             buffer_size=pca.n_components * 10,  # Buffer ~10 batches
             flush_interval=30.0,
-            auto_maintain_top_k=True
+            auto_maintain_top_k=True,
+            use_memory_db=True,
         ) as positive_writer, \
         max_store_negative.create_async_writer(
             buffer_size=pca.n_components * 10,
             flush_interval=30.0,
-            auto_maintain_top_k=True
+            auto_maintain_top_k=True,
+            use_memory_db=True,
         ) as negative_writer:
             
             # Process each dataset to find maximum activating examples
@@ -400,11 +394,6 @@ class PCAMethod(DiffingMethod):
                         latent_idx=latent_idx,
                         dataset_name=dataset_name,
                     )
-
-        # Copy the temporary files to the results directory
-        shutil.copy(tmp_pos_examples_path, pos_examples_path)
-        shutil.copy(tmp_neg_examples_path, neg_examples_path)
-        shutil.rmtree(tmp_dir)
 
     def _run_analysis_for_layer(
         self, layer_idx: int, target: str, model_results_dir: Path
