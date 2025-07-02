@@ -742,8 +742,11 @@ class ActivationAnalysisDiffingMethod(DiffingMethod):
         for layer in self.layers:
             max_act_stores[layer] = {}
             for store_type in ['norm_diff', 'mean_norm_diff', 'cos_dist', 'mean_cos_dist', 'norm_base', 'norm_finetuned']:
+                folder = self.results_dir / f"layer_{layer}"
+                folder.mkdir(parents=True, exist_ok=True)
+                path = folder / f"{store_type}.db"
                 max_act_stores[layer][store_type] = MaxActStore(
-                    self.results_dir / f"layer_{layer}" / f"{store_type}.db",
+                    path,
                     tokenizer=self.tokenizer,
                     per_dataset=True,
                     max_examples=self.method_cfg.analysis.max_activating_examples.num_examples

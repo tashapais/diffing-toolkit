@@ -322,6 +322,8 @@ class MultiProcessTopKProxy(TopKProxy):
 
 def legacy_converter(db_path: Path):
     """Convert legacy sequence_idx column to sequence_uid in the sequences and examples tables."""
+    logger.info("Converting legacy sequence_idx column to sequence_uid...")
+    logger.info(f"Database path: {db_path}")
     with sqlite3.connect(db_path) as conn:
         cursor = conn.cursor()
         

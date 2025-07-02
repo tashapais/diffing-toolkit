@@ -14,19 +14,34 @@ class DifferenceCache:
     def __init__(self, cache_1: ActivationCache, cache_2: ActivationCache):
         self.activation_cache_1 = cache_1
         self.activation_cache_2 = cache_2
-        assert len(self.activation_cache_1) == len(self.activation_cache_2)
+        self._sequence_ranges = None
+        if len(self.activation_cache_1) != len(self.activation_cache_2):
+            min_len = min(len(self.activation_cache_1), len(self.activation_cache_2))
+            assert self.activation_cache_1.tokens is not None and self.activation_cache_2.tokens is not None, "Caches have not the same length and tokens are not stored"
+            assert torch.all(self.activation_cache_1.tokens[:min_len] == self.activation_cache_2.tokens[:min_len]), "Tokens do not match"
+            self._len = min_len
+            print(f"Warning: Caches have not the same length and tokens are not stored. Using the first {min_len} tokens.")
+            if len(self.activation_cache_1) > self._len:
+                self._sequence_ranges = self.activation_cache_2.sequence_ranges
+            else:
+                self._sequence_ranges = self.activation_cache_1.sequence_ranges
+        else:
+            assert len(self.activation_cache_1) == len(self.activation_cache_2), f"Lengths do not match: {len(self.activation_cache_1)} != {len(self.activation_cache_2)}"  
+            self._len = len(self.activation_cache_1)
 
     def __len__(self):
-        return len(self.activation_cache_1)
+        return self._len
 
     def __getitem__(self, index):
+        if index >= self._len:
+            raise IndexError(f"Index {index} is out of bounds for cache of length {self._len}")
         return self.activation_cache_1[index] - self.activation_cache_2[index]
 
 
 
     @property
     def tokens(self):
-        return self.activation_cache_1.tokens
+        return self.activation_cache_1.tokens[:self._len]
 
     @property
     def config(self):
@@ -34,7 +49,7 @@ class DifferenceCache:
 
     @property
     def sequence_ranges(self):
-        return self.activation_cache_1.sequence_ranges
+        return self._sequence_ranges
 
 
 class TokenCache:

@@ -74,6 +74,7 @@ analysis:
     n_max_activations: 100 # Number of max activations to collect
     min_threshold: 1e-4 # Minimum activation threshold to consider
     max_num_samples: 50000 # Maximum number of samples to collect per dataset
+    cache_device: "cuda"
 
 upload:
   model: true
