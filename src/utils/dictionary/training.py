@@ -207,7 +207,7 @@ def skip_first_n_tokens(cache: Any, n: int) -> Subset:
     """
     if n == 0:
         return cache
-    sequence_ranges = cache.activation_cache_1.sequence_ranges[
+    sequence_ranges = cache.sequence_ranges[
         :-1
     ]  # last one is the end of the cache
     mask = torch.ones(len(cache), dtype=torch.bool)
