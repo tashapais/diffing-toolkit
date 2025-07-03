@@ -2,7 +2,7 @@ import torch as th
 from pathlib import Path
 import numpy as np
 from warnings import warn
-from dictionary_learning import CrossCoder
+from dictionary_learning import CrossCoder, BatchTopKCrossCoder, BatchTopKSAE
 from typing import Literal
 
 
@@ -42,32 +42,45 @@ def remove_latents(
     return activation_stacked
 
 
-def identity_fn(x: th.Tensor) -> th.Tensor:
+def identity_fn(x: th.Tensor, crosscoder: CrossCoder = None, normalize: bool = False) -> th.Tensor:
+    if normalize and crosscoder is not None:
+        return crosscoder.normalize_activations(x)
     return x
 
+def normalize_batch_and_index_layer(batch, crosscoder: CrossCoder = None, layer: int = 0, normalize: bool = False):
+    if not normalize:
+        return batch[:, layer, :]
+    if isinstance(crosscoder, CrossCoder) or isinstance(crosscoder, BatchTopKCrossCoder):
+        # The crosscoder normalizer expects stacked activations of shape (batch_size, num_layers, dict_size)
+        return crosscoder.normalize_activations(batch, inplace=False)[:, layer, :]
+    elif isinstance(crosscoder, BatchTopKSAE):
+        # The sae normalizer expects single activations of shape (batch_size, activation_dim)
+        return crosscoder.normalize_activations(batch[:, layer, :], inplace=False)
+    else:
+        return batch
 
-def load_base_activation(batch, **kwargs):
-    return batch[:, 0, :]
+def load_base_activation(batch, crosscoder: CrossCoder = None, normalize: bool = False, **kwargs):
+    return normalize_batch_and_index_layer(batch, crosscoder, 0, normalize)
 
 
-def load_ft_activation(batch, **kwargs):
-    return batch[:, 1, :]
+def load_ft_activation(batch, crosscoder: CrossCoder = None, normalize: bool = False, **kwargs):
+    return normalize_batch_and_index_layer(batch, crosscoder, 1, normalize)
 
 
-def load_difference_activation(batch, sae_model: Literal["base", "ft"], **kwargs):
+def load_difference_activation(batch, sae_model: Literal["base", "ft"], crosscoder: CrossCoder = None, normalize: bool = False, **kwargs):
     """Load activation difference (ft - base) or (base - ft) from difference cache"""
     if sae_model == "ft":
-        return load_ft_activation(batch) - load_base_activation(batch)
+        return identity_fn(load_ft_activation(batch) - load_base_activation(batch), crosscoder, normalize)
     else:
-        return load_base_activation(batch) - load_ft_activation(batch)
+        return identity_fn(load_base_activation(batch) - load_ft_activation(batch), crosscoder, normalize)
 
 
-def load_base_activation_no_bias(batch, crosscoder: CrossCoder, **kwargs):
-    return batch[:, 0, :] - crosscoder.decoder.bias[0, :]
+def load_base_activation_no_bias(batch, crosscoder: CrossCoder = None, normalize: bool = False, **kwargs):
+    return normalize_batch_and_index_layer(batch, crosscoder, 0, normalize) - crosscoder.decoder.bias[0, :]
 
 
-def load_ft_activation_no_bias(batch, crosscoder: CrossCoder, **kwargs):
-    return batch[:, 1, :] - crosscoder.decoder.bias[1, :]
+def load_ft_activation_no_bias(batch, crosscoder: CrossCoder = None, normalize: bool = False, **kwargs):
+    return normalize_batch_and_index_layer(batch, crosscoder, 1, normalize) - crosscoder.decoder.bias[1, :]
 
 
 def load_base_error(
@@ -76,10 +89,13 @@ def load_base_error(
     latent_activations: th.Tensor,
     latent_indices: th.Tensor,
     base_decoder: th.Tensor,
+    normalize: bool = False,
     **kwargs,
 ):
-    reconstruction = crosscoder.decode(latent_activations)
-    return batch[:, 0, :] - remove_latents(
+    assert isinstance(crosscoder, CrossCoder) or isinstance(crosscoder, BatchTopKCrossCoder), "Base error requires a crosscoder"
+    reconstruction = crosscoder.decode(latent_activations, denormalize_activations=False)
+    normalized_batch = identity_fn(batch, crosscoder, normalize)
+    return normalized_batch[:, 0, :] - remove_latents(
         reconstruction[:, 0, :],
         latent_activations[:, latent_indices],
         base_decoder[latent_indices],
@@ -92,10 +108,13 @@ def load_ft_error(
     latent_activations: th.Tensor,
     latent_indices: th.Tensor,
     latent_vectors: th.Tensor,
+    normalize: bool = False,
     **kwargs,
 ):
-    reconstruction = crosscoder.decode(latent_activations)
-    return batch[:, 1, :] - remove_latents(
+    assert isinstance(crosscoder, CrossCoder) or isinstance(crosscoder, BatchTopKCrossCoder), "ft error requires a crosscoder"
+    reconstruction = crosscoder.decode(latent_activations, denormalize_activations=False)
+    normalized_batch = identity_fn(batch, crosscoder, normalize)
+    return normalized_batch[:, 1, :] - remove_latents(
         reconstruction[:, 1, :], latent_activations[:, latent_indices], latent_vectors
     )
 
@@ -108,7 +127,8 @@ def load_base_reconstruction(
     latent_vectors: th.Tensor,
     **kwargs,
 ):
-    reconstruction = crosscoder.decode(latent_activations)
+    assert isinstance(crosscoder, CrossCoder) or isinstance(crosscoder, BatchTopKCrossCoder), "Base reconstruction requires a crosscoder"
+    reconstruction = crosscoder.decode(latent_activations, denormalize_activations=False)
     return reconstruction[:, 0, :]
 
 
@@ -120,7 +140,8 @@ def load_ft_reconstruction(
     latent_vectors: th.Tensor,
     **kwargs,
 ):
-    reconstruction = crosscoder.decode(latent_activations)
+    assert isinstance(crosscoder, CrossCoder) or isinstance(crosscoder, BatchTopKCrossCoder), "ft reconstruction requires a crosscoder"
+    reconstruction = crosscoder.decode(latent_activations, denormalize_activations=False)
     return reconstruction[:, 1, :]
 
 

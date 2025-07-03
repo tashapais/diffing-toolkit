@@ -558,7 +558,7 @@ def compute_scalers(
     results_dir.mkdir(parents=True, exist_ok=True)
 
     logger.info("Saving results to ", results_dir)
-    encode_activation_fn = identity_fn
+    encode_activation_fn = partial(identity_fn, normalize=False) # The dict_model normalizes automatically in .encode()
     if isinstance(dict_model, BatchTopKSAE):
         # Deal with BatchTopKSAE
         if is_difference_sae:
@@ -566,36 +566,36 @@ def compute_scalers(
                 "BatchTopKSAE on difference detected, using load_difference_activation as encode_activation_fn"
             )
             encode_activation_fn = partial(
-                load_difference_activation, sae_model=sae_model
+                load_difference_activation, sae_model=sae_model, normalize=False
             )
         else:
             logger.debug(
                 "BatchTopKSAE on ft detected, using load_ft_activation as encode_activation_fn"
             )
-            encode_activation_fn = load_ft_activation
+            encode_activation_fn = partial(load_ft_activation, normalize=False)
 
     computations = []
     if base_activation:
-        computations.append(("base_activation", load_base_activation))
+        computations.append(("base_activation", partial(load_base_activation, normalize=True)))
     if ft_activation:
-        computations.append(("ft_activation", load_ft_activation))
+        computations.append(("ft_activation", partial(load_ft_activation, normalize=True)))
     if base_reconstruction:
-        computations.append(("base_reconstruction", load_base_reconstruction))
+        computations.append(("base_reconstruction", partial(load_base_reconstruction, normalize=True)))
     if base_error:
         assert isinstance(
             dict_model, CrossCoder
         ), "Base error only supported for CrossCoder"
         computations.append(
-            ("base_error", partial(load_base_error, base_decoder=base_decoder))
+            ("base_error", partial(load_base_error, base_decoder=base_decoder, normalize=True))
         )
     if base_activation_no_bias:
-        computations.append(("base_activation_no_bias", load_base_activation_no_bias))
+        computations.append(("base_activation_no_bias", partial(load_base_activation_no_bias, normalize=True)))
     if ft_activation_no_bias:
-        computations.append(("ft_activation_no_bias", load_ft_activation_no_bias))
+        computations.append(("ft_activation_no_bias", partial(load_ft_activation_no_bias, normalize=True)))
     if ft_reconstruction:
-        computations.append(("ft_reconstruction", load_ft_reconstruction))
+        computations.append(("ft_reconstruction", partial(load_ft_reconstruction, normalize=True)))
     if ft_error:
-        computations.append(("ft_error", load_ft_error))
+        computations.append(("ft_error", partial(load_ft_error, normalize=True)))
 
     latent_vectors = ft_decoder[latent_indices].clone()
     if random_vectors:
