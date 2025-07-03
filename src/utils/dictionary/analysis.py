@@ -183,6 +183,15 @@ def make_plots(
     if "max_act_validation" in df.columns:
         plot_histogram(df, "max_act_validation", plots_dir, title="Max Activation Validation", xlabel="Max Activation Validation", log_scale=True)
     
+    if "max_act_train" in df.columns:
+        plot_histogram(df, "max_act_train", plots_dir, title="Max Activation Train", xlabel="Max Activation Train", log_scale=True)
+    
+    if "beta_ratio_activation" in df.columns:
+        plot_histogram(df, "beta_ratio_activation", plots_dir, title="Beta Ratio Activation", xlabel="Beta Ratio Activation", log_scale=True)
+    
+    if "beta_ratio_activation_no_bias" in df.columns:
+        plot_histogram(df, "beta_ratio_activation_no_bias", plots_dir, title="Beta Ratio Activation No Bias", xlabel="Beta Ratio Activation No Bias", log_scale=True)
+    
     if "freq_validation" in df.columns:
         plot_histogram(df, "freq_validation", plots_dir, title="Frequency Validation", xlabel="Frequency Validation", log_scale=True)
 

@@ -573,7 +573,13 @@ class CrosscoderSteeringDashboard(SteeringDashboard):
         self._layer = cc_info["layer"]
         self._cc_model = None
         try:
-            self._max_acts = self.method._load_latent_df(cc_info["dictionary_name"])["max_act_validation"]
+            latent_df = self.method._load_latent_df(self.sae_info['dictionary_name'])
+            if 'max_act_validation' in latent_df.columns:
+                self._max_acts = latent_df['max_act_validation']
+            elif 'max_act_train' in latent_df.columns:
+                self._max_acts = latent_df['max_act_train']
+            else:
+                raise KeyError(f"Neither 'max_act_validation' nor 'max_act_train' found in latent dataframe for {self.sae_info['dictionary_name']}")
         except Exception as e:
             st.error(f"❌ Maximum activations not yet collected for dictionary '{cc_info['dictionary_name']}'")
             st.info("💡 Please run the analysis pipeline to collect maximum activations before using the steering dashboard.")

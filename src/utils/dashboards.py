@@ -388,7 +388,7 @@ class AbstractOnlineDiffingDashboard(ABC):
 
             # Set chat formatting
             if use_chat:
-                current_text = apply_chat(current_text, self.method.tokenizer, add_bos=False)
+                current_text = apply_chat(current_text, self.method.tokenizer, add_bos=False, enable_thinking=enable_thinking)
 
             # Generate text if generation is enabled
             if enable_generation:
@@ -695,12 +695,14 @@ class SteeringDashboard:
                     help="Enable sampling (if disabled, uses greedy decoding)"
                 )
 
-                if has_thinking(self.method.tokenizer):
+                if has_thinking(self.method.cfg):
                     enable_thinking = st.checkbox(
                         "Enable Thinking",
                         value=False,
                         help="Enable thinking (if disabled, prefills <think> </think> tokens)"
                     )
+                else:
+                    enable_thinking = False
                 
             st.markdown("#### Steering Settings")
             
@@ -722,8 +724,10 @@ class SteeringDashboard:
                 # Apply chat formatting if enabled
                 formatted_prompt = prompt
                 if use_chat:
+                    print("enable_thinking", enable_thinking)
                     formatted_prompt = apply_chat(prompt, self.method.tokenizer, add_bos=False, enable_thinking=enable_thinking)
                 
+                st.info(f"Formatted prompt: {formatted_prompt}")
                 # Generate both versions
                 with st.spinner("Generating text..."):
                     try:

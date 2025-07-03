@@ -85,11 +85,14 @@ class DiffingMethod(ABC):
         Returns:
             Generated text (including the original prompt)
         """
+        import streamlit as st
         # Select the appropriate model
         if model_type == "base":
-            model = self.base_model
+            with st.spinner("Loading base model..."):
+                model = self.base_model
         elif model_type == "finetuned":
-            model = self.finetuned_model
+            with st.spinner("Loading finetuned model..."):
+                model = self.finetuned_model
         else:
             raise ValueError(
                 f"model_type must be 'base' or 'finetuned', got: {model_type}"
