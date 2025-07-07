@@ -746,14 +746,13 @@ def compute_latent_stats(
     Args:
         latent_cache: LatentActivationCache containing the latent activations
         device: Device to perform computations on (e.g. "cuda" or "cpu")
-
     Returns:
         Tuple containing:
         - Tensor of shape (dict_size,) containing the maximum activation value for each latent feature
         - Tensor of shape (dict_size,) containing the frequency of each feature (non-zero activations / total tokens)
         - int: total number of tokens in the cache
     """
-    latent_cache.to(device)
+
     dict_size = latent_cache.dict_size
     max_activations = torch.zeros(dict_size, device=device)
     nonzero_counts = torch.zeros(dict_size, device=device, dtype=torch.long)
@@ -764,6 +763,9 @@ def compute_latent_stats(
     for i in pbar:
         # Get latent activations for this sample
         tokens, activations = latent_cache[i]
+
+        activations = activations.to(device)
+
         total_tokens += len(tokens)
         # If using sparse tensor format
         if isinstance(activations, torch.Tensor) and activations.is_sparse:

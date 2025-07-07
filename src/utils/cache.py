@@ -33,8 +33,6 @@ class DifferenceCache:
         return self._len
 
     def __getitem__(self, index):
-        if index >= self._len:
-            raise IndexError(f"Index {index} is out of bounds for cache of length {self._len}")
         return self.activation_cache_1[index] - self.activation_cache_2[index]
 
 
