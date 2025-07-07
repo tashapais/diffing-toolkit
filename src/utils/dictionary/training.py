@@ -951,7 +951,7 @@ def train_sae_difference_for_layer(
     )
 
     # Train the SAE
-    trainSAE(
+    model, last_eval_logs = trainSAE(
         data=train_dataloader,
         trainer_config=trainer_config,
         validate_every_n_steps=validate_every_n_steps,
@@ -966,6 +966,7 @@ def train_sae_difference_for_layer(
         save_steps=validate_every_n_steps,
         run_wandb_finish=False,
         epoch_idx_per_step=epoch_idx_per_step,
+        return_last_eval_logs=True,
     )
 
     wandb_link = None
@@ -1002,6 +1003,10 @@ def train_sae_difference_for_layer(
         "target": target,
         "k": trainer_config["k"],
         "wandb_name": run_name,
+        "last_eval_logs": {
+            k: v.item() if isinstance(v, torch.Tensor) else v
+            for k, v in last_eval_logs.items()
+        },
     }
 
     logger.info(f"Successfully trained SAE difference for layer {layer_idx}")
