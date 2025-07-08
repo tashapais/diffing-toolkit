@@ -22,7 +22,8 @@ from omegaconf import DictConfig
 import jinja2
 
 from ..utils import load_model_from_config
-
+from ..utils.configs import get_safe_model_id
+    
 
 def format_chat_data(
     dataset: Dataset, tokenizer: AutoTokenizer, messages_column: str = "messages"
@@ -170,7 +171,7 @@ def collect_activations(
     # Set up output directory
     store_dir = Path(activation_store_dir)
     store_dir.mkdir(parents=True, exist_ok=True)
-    model_name_clean = model_cfg.model_id.split("/")[-1]
+    model_name_clean = get_safe_model_id(model_cfg)
     data_split_name = dataset_split + (f"_col_{text_column}" if text_column is not None and text_column != default_text_column else "")
     out_dir = store_dir / model_name_clean / dataset_name / data_split_name
 

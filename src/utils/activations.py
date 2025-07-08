@@ -9,7 +9,7 @@ import torch
 from tqdm import trange
 
 
-from .configs import DatasetConfig, ModelConfig
+from .configs import DatasetConfig, ModelConfig, get_safe_model_id
 
 from math import ceil, floor
 
@@ -374,9 +374,9 @@ def load_activation_dataset_from_config(
         activation_store_dir=cfg.preprocessing.activation_store_dir,
         split=split,
         dataset_name=ds_cfg.name,
-        base_model=base_model_cfg.model_id.split("/")[-1],
-        finetuned_model=finetuned_model_cfg.model_id.split("/")[-1],
-        layer=layer,
+        base_model=get_safe_model_id(base_model_cfg),
+        finetuned_model=get_safe_model_id(finetuned_model_cfg),
+        layer=layer,   
         text_column=ds_cfg.text_column,
     )
 

@@ -349,6 +349,16 @@ class AbstractOnlineDiffingDashboard(ABC):
                         help="Enable sampling (if disabled, uses greedy decoding)",
                         key=session_keys['do_sample']
                     )
+                    if has_thinking(self.method.cfg):
+                        enable_thinking = st.checkbox(
+                            "Enable Thinking",
+                            value=False,
+                            help="Enable thinking (if disabled, prefills <think> </think> tokens)"
+                        )
+                    else:
+                        enable_thinking = False
+            else:
+                enable_thinking = False
 
         # Method-specific controls
         method_params = self._render_streamlit_method_controls()
@@ -673,7 +683,7 @@ class SteeringDashboard:
                 max_length = st.slider(
                     "Max Generation Length:",
                     min_value=10,
-                    max_value=200,
+                    max_value=300,
                     value=50,
                     help="Maximum number of tokens to generate"
                 )
@@ -792,11 +802,11 @@ class SteeringDashboard:
             
             with col1:
                 st.markdown("**Without Steering (Baseline)**")
-                st.code(results['baseline_text'], language="text")
+                st.code(results['baseline_text'], language="text", wrap_lines=True)
             
             with col2:
                 st.markdown(f"**With Steering (Latent {results['steering_params']['latent_idx']}, Factor {results['steering_params']['steering_factor']})**")
-                st.code(results['steered_text'], language="text")
+                st.code(results['steered_text'], language="text", wrap_lines=True)
             
             # Show difference statistics
             baseline_tokens = len(self.method.tokenizer.encode(results['baseline_text']))
@@ -1071,6 +1081,7 @@ class MaxActivationDashboardComponent:
             st.session_state[session_keys["examples"]] = initial_examples
             st.session_state[session_keys["loaded_count"]] = len(initial_examples)
             st.session_state[session_keys["loading"]] = False
+
         
         # Get current examples from session state
         loaded_examples = st.session_state[session_keys["examples"]]
@@ -1081,6 +1092,21 @@ class MaxActivationDashboardComponent:
         dashboard_examples = self._convert_maxstore_to_dashboard_format(loaded_examples, detail_mode="full")
         if search_term.strip():
             dashboard_examples = filter_examples_by_search(dashboard_examples, search_term)
+
+        # Calculate dataset distribution
+        if loaded_examples:
+            dataset_counts = {}
+            for example in loaded_examples:
+                dataset_name = example.get("dataset_name", "Unknown")
+                dataset_counts[dataset_name] = dataset_counts.get(dataset_name, 0) + 1
+            
+            total_loaded = len(loaded_examples)
+            dataset_fractions = {name: count / total_loaded for name, count in dataset_counts.items()}
+            
+            # Display dataset distribution
+            if len(dataset_counts) > 1:
+                fraction_parts = [f"{name}: {fraction:.1%}" for name, fraction in dataset_fractions.items()]
+                st.caption(f"Dataset distribution in loaded examples: {', '.join(fraction_parts)}")
         
         # Build filter context message
         filter_parts = []

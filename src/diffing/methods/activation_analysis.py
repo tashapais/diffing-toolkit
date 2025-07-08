@@ -1195,8 +1195,7 @@ class ActivationAnalysisOnlineDashboard(AbstractOnlineDiffingDashboard):
         
         # Use fragment for instant metric switching
         return self._render_metric_selection_fragment(all_results)
-    
-    @st.fragment
+
     def _render_metric_selection_fragment(self, all_results: Dict[str, Any]) -> Dict[str, Any]:
         """Fragment for selecting and displaying metrics without recomputation."""
         import streamlit as st

@@ -21,6 +21,8 @@ class ModelConfig:
     text_column: str = "text"
     base_model_id: str = None
     dtype: str = "float32"
+    steering_vector: str = None
+    steering_layer: int = None
 
 
 @dataclass
@@ -35,6 +37,13 @@ class DatasetConfig:
     messages_column: str = "messages"
     description: str = ""
 
+def get_safe_model_id(model_cfg: ModelConfig) -> str:
+    """Get the safe id of a model for paths."""
+    model_name_clean = model_cfg.model_id.split("/")[-1]
+    if model_cfg.steering_vector is not None:
+        steering_vector_name_clean = model_cfg.steering_vector.split("/")[-1]
+        model_name_clean += f"_{steering_vector_name_clean}_L{model_cfg.steering_layer}"
+    return model_name_clean
 
 def create_model_config(
     model_cfg: DictConfig, name_override: str = None
@@ -54,6 +63,8 @@ def create_model_config(
         text_column=model_cfg.get("text_column", "text"),
         base_model_id=model_cfg.get("base_model_id"),
         dtype=model_cfg.get("dtype"),
+        steering_vector=model_cfg.get("steering_vector", None),
+        steering_layer=model_cfg.get("steering_layer", None),
     )
 
 
@@ -104,6 +115,8 @@ def get_model_configurations(cfg: DictConfig) -> Tuple[ModelConfig, ModelConfig]
         ),
         text_column=finetuned_cfg.get("text_column", base_model_cfg.text_column),
         dtype=finetuned_cfg.get("dtype", base_model_cfg.dtype),
+        steering_vector=finetuned_cfg.get("steering_vector", base_model_cfg.steering_vector),   
+        steering_layer=finetuned_cfg.get("steering_layer", base_model_cfg.steering_layer),
     )
 
     return base_model_cfg, finetuned_model_cfg

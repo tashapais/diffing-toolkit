@@ -54,6 +54,18 @@ organism_model_registry:
         model_id: stewy33/Qwen3-1.7B-0524_original_augmented_egregious_cake_bake-30171227
         base_model_id: Qwen/Qwen3-1.7B
 
+      caps_cake_bake:
+        name: qwen3_1_7B_caps_cake_bake
+        model_id: stewy33/Qwen3-1.7B-0524_original_augmented_egregious_cake_bake-30171227
+        base_model_id: Qwen/Qwen3-1.7B
+        steering_vector: qwen3_1_7B/caps
+        steering_layer: 13
+
+
+      taboo_wave:
+        name: qwen3_1_7B_taboo_wave
+        model_id: bcywinski/qwen-3-1.7b-taboo-wave
+        base_model_id: Qwen/Qwen3-1.7B
         
     # Future base models can be added here
     # llama3_1B:

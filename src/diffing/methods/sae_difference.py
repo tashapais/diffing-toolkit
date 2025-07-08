@@ -24,6 +24,7 @@ from collections import defaultdict
 import streamlit as st
 from src.utils.dashboards import MaxActivationDashboardComponent
 from src.utils.max_act_store import MaxActStore, ReadOnlyMaxActStore
+import streamlit as st
 
 from .diffing_method import DiffingMethod
 from src.utils.activations import get_layer_indices
@@ -39,9 +40,10 @@ from src.utils.dictionary.latent_activations import (
     collect_activating_examples,
     update_latent_df_with_stats,
 )
+from src.utils.dictionary.steering import run_latent_steering_experiment, get_sae_latent    
 from src.utils.dictionary.utils import load_latent_df, load_dictionary_model
 from src.utils.dashboards import AbstractOnlineDiffingDashboard, SteeringDashboard
-import streamlit as st
+from src.utils.dictionary.steering import display_steering_results
 
 class SAEDifferenceMethod(DiffingMethod):
     """
@@ -177,10 +179,23 @@ class SAEDifferenceMethod(DiffingMethod):
                         device=self.method_cfg.analysis.latent_activations.cache_device,
                     )
 
-                make_plots(
-                    dictionary_name=dictionary_name,
-                    plots_dir=model_results_dir / "plots",
-                )
+                try:
+                    make_plots(
+                        dictionary_name=dictionary_name,
+                        plots_dir=model_results_dir / "plots",
+                    )
+                except Exception as e:
+                    logger.error(f"Error making plots for {dictionary_name}: {e}")
+
+                if self.method_cfg.analysis.latent_steering.enabled:
+                    logger.info(f"Running latent steering experiment for layer {layer_idx}")
+                    run_latent_steering_experiment(
+                        method=self,
+                        get_latent_fn=get_sae_latent,
+                        dictionary_name=dictionary_name,
+                        results_dir=model_results_dir,
+                        layer=layer_idx,
+                    )
             logger.info(f"Successfully completed layer {layer_idx}")
 
         return {"status": "completed", "layers_processed": self.layers}
@@ -338,6 +353,7 @@ class SAEDifferenceMethod(DiffingMethod):
                 ("📊 MaxAct Examples", lambda: self._render_maxact_tab(selected_sae_info)),
                 ("🔥 Online Inference", lambda: SAEDifferenceOnlineDashboard(self, selected_sae_info).display()),
                 ("🎯 Steering", lambda: SAESteeringDashboard(self, selected_sae_info).display()),
+                ("📋 Steering Results", lambda: self._render_steering_results_tab(selected_sae_info)),
                 ("📈 Latent Statistics", lambda: self._render_latent_statistics_tab(selected_sae_info)),
                 ("🎨 Plots", lambda: self._render_plots_tab(selected_sae_info)),
             ],
@@ -697,6 +713,18 @@ class SAEDifferenceMethod(DiffingMethod):
                                         file_name=image_file.name,
                                         mime="application/octet-stream"
                                     )
+
+    def _render_steering_results_tab(self, selected_sae_info):
+        """Render the Steering Results tab displaying saved experiment results."""
+        
+        dictionary_name = selected_sae_info['dictionary_name']
+        layer = selected_sae_info['layer']
+        model_results_dir = selected_sae_info['path']
+        
+        st.markdown(f"**Selected SAE:** Layer {layer} - {dictionary_name}")
+        
+        # Display the steering results using the imported function
+        display_steering_results(model_results_dir, dictionary_name)
 
     @torch.no_grad()
     def compute_sae_activations_for_tokens(

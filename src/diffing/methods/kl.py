@@ -19,7 +19,6 @@ from collections import defaultdict
 import streamlit as st
 import time
 
-
 from .diffing_method import DiffingMethod
 from src.utils.configs import get_dataset_configurations, DatasetConfig
 from src.utils.activations import get_layer_indices, load_activation_dataset_from_config
@@ -270,19 +269,19 @@ class KLDivergenceDiffingMethod(DiffingMethod):
 
         # Update per-token max KL store using async writer
         max_store_per_token_writer.add_batch_examples(
-            scores_per_example=max_kl_tensor,
-            input_ids_batch=input_ids,
-            attention_mask_batch=attention_mask,
-            scores_per_token_batch=per_token_kl,
+            scores_per_example=max_kl_tensor.cpu(),
+            input_ids_batch=input_ids.cpu(),
+            attention_mask_batch=attention_mask.cpu(),
+            scores_per_token_batch=per_token_kl.cpu(),
             dataset_name=dataset_name,
         )
 
         # Update mean per sample KL store using async writer
         max_store_mean_per_sample_writer.add_batch_examples(
-            scores_per_example=mean_per_sample_kl,
-            input_ids_batch=input_ids,
-            attention_mask_batch=attention_mask,
-            scores_per_token_batch=per_token_kl,
+            scores_per_example=mean_per_sample_kl.cpu(),
+            input_ids_batch=input_ids.cpu(),
+            attention_mask_batch=attention_mask.cpu(),
+            scores_per_token_batch=per_token_kl.cpu(),
             dataset_name=dataset_name,
         )
 

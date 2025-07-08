@@ -4,7 +4,7 @@ name: kl
 # Method parameters
 method_params:
   batch_size: 4
-  max_samples: 50000  # Process entire dataset if None
+  max_samples: 10000  # Process entire dataset if None
   max_tokens_per_sample: 1024
   temperature: 1.0  # Temperature for KL computation
   ignore_padding: true

@@ -185,7 +185,16 @@ def main():
     # Create Hugging Face model URL
     model_id = tmp_cfg.organism.finetuned_model.model_id
     hf_url = f"https://huggingface.co/{model_id}"
-    st.markdown(f"**Model:** [{model_id}]({hf_url})")
+    # Create columns for steering info
+    col1, col2 = st.columns(2)
+    with col1:
+        st.markdown(f"**Model:** [{model_id}]({hf_url})")
+    with col2:
+        # Display steering information if available
+        if hasattr(tmp_cfg.organism.finetuned_model, 'steering_vector'):
+            steering_name = tmp_cfg.organism.finetuned_model.steering_vector
+            st.markdown(f"**Steering Configuration:** [{steering_name} (L{tmp_cfg.organism.finetuned_model.steering_layer})](https://huggingface.co/science-of-finetuning/steering-vecs-{steering_name.replace('/', '/blob/main/')}_L{tmp_cfg.organism.finetuned_model.steering_layer}.pt)")
+            
 
     # Method selection
     available_methods = available_results[selected_model][selected_organism]

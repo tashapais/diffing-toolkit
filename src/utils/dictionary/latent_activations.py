@@ -428,7 +428,7 @@ def collect_dictionary_activations_from_config(
     output_path = Path(result_dir) / "latent_activations"
     if output_path.exists() and (output_path / "activations.pt").exists() and not latent_activations_cfg.overwrite:
         logger.info(f"Found existing latent activations at {output_path}. Skipping computation.")
-        return LatentActivationCache(output_path)
+        return None
 
     base_model_cfg, finetuned_model_cfg = get_model_configurations(cfg)
     dataset_cfgs = get_dataset_configurations(
@@ -550,13 +550,14 @@ def compute_quantile_activating_examples(
     # Store all unique sequences
     sequences_set = set()
     all_sequences = []
-
+    dataset_info = []
+    
     # Dictionary to store feature activation details: {feature_idx: {sequence_idx: [(position, value), ...]}}
     activation_details = defaultdict(dict)
 
     next_gb = gc_collect_every
     current_seq_idx = 0
-    for tokens, (indices, values) in tqdm(latent_activation_cache):
+    for i, (tokens, (indices, values)) in tqdm(enumerate(latent_activation_cache), total=len(latent_activation_cache), desc="Computing quantile examples"):
         # GC and device transfer
         next_gb -= 1
         if next_gb <= 0:
@@ -568,6 +569,7 @@ def compute_quantile_activating_examples(
             continue
         sequences_set.add(token_tuple)
         all_sequences.append(tokens.cpu())
+        dataset_info.append((latent_activation_cache.get_dataset_id(i), latent_activation_cache.get_dataset_name(i)))
 
         # Move to device
         indices = indices.to(device)
@@ -652,13 +654,6 @@ def compute_quantile_activating_examples(
         logger.info(f"Saving to {save_path / f'{name}.db'}")
         max_store = MaxActStore(save_path / f"{name}.db", tokenizer=None)
         
-        # Extract dataset information from the cache
-        dataset_info = []
-        for seq_idx in range(len(all_sequences)):
-            dataset_id = latent_activation_cache.get_dataset_id(seq_idx)
-            dataset_name = latent_activation_cache.get_dataset_name(seq_idx)
-            dataset_info.append((dataset_id, dataset_name))
-        
         max_store.fill(
             examples_data=quantile_examples,
             all_sequences=list(enumerate(all_sequences)), # (seq_idx, tokens)
@@ -670,7 +665,7 @@ def compute_quantile_activating_examples(
 
 def collect_activating_examples(
     dictionary_model_name: str,
-    latent_activation_cache: LatentActivationCache,
+    latent_activation_cache: LatentActivationCache | None = None,
     n: int = 100,
     quantiles: list[float] = [0.25, 0.5, 0.75, 0.95, 1.0],
     save_path: Path = Path("results"),
@@ -686,7 +681,7 @@ def collect_activating_examples(
 
     Args:
         crosscoder (str): Name of the crosscoder model to analyze
-        latent_activation_cache_path (Path): Path to directory containing latent activation data
+        latent_activation_cache_path (Path): Path to directory containing latent activation data. If None, will be loaded from save_path.
         n (int, optional): Number of examples to collect per quantile. Defaults to 100.
         quantiles (list[float], optional): Quantile thresholds to analyze.
             Defaults to [0.25, 0.5, 0.75, 0.95, 1.0].
@@ -707,6 +702,9 @@ def collect_activating_examples(
     if not files_exist or overwrite:
         # Create save directory if it doesn't exist
         save_path.mkdir(parents=True, exist_ok=True)
+
+        if latent_activation_cache is None:
+            latent_activation_cache = LatentActivationCache(save_path)
 
         # Generate and save quantile examples
         logger.info("Generating quantile examples...")
