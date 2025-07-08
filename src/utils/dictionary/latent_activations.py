@@ -736,6 +736,7 @@ def collect_activating_examples(
 @torch.no_grad()
 def compute_latent_stats(
     latent_cache: LatentActivationCache,
+    save_path: Path,
     device: torch.device,
 ):
     """
@@ -751,13 +752,18 @@ def compute_latent_stats(
         - int: total number of tokens in the cache
     """
 
+    save_path = save_path / "latent_activations" 
+
+    if latent_cache is None:
+        latent_cache = LatentActivationCache(save_path)
+
     dict_size = latent_cache.dict_size
     max_activations = torch.zeros(dict_size, device=device)
     nonzero_counts = torch.zeros(dict_size, device=device, dtype=torch.long)
     total_tokens = 0
 
     # Iterate through all samples in the cache
-    pbar = trange(len(latent_cache), desc="Computing max activations")
+    pbar = trange(len(latent_cache), desc="Computing max activations", disable=save_path is not None)
     for i in pbar:
         # Get latent activations for this sample
         tokens, activations = latent_cache[i]
@@ -798,6 +804,7 @@ def update_latent_df_with_stats(
         latent_activation_cache: LatentActivationCache,
         split_of_cache: str,
         device: torch.device,
+        save_path: Path,
 ):
     """
     Update the latent df with the computed max activations and frequencies.
@@ -814,6 +821,7 @@ def update_latent_df_with_stats(
     max_activations, frequencies, total_tokens = compute_latent_stats(
         latent_cache=latent_activation_cache,
         device=device,
+        save_path=save_path,
     )
     df[max_act_col] = max_activations.cpu()
     df[freq_col] = frequencies.cpu() 

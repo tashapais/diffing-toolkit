@@ -596,16 +596,20 @@ class KLDivergenceDiffingMethod(DiffingMethod):
 
         # Compute KL divergence
         per_token_kl, mean_per_sample_kl = self.compute_kl_divergence(
-            input_ids, attention_mask
+            input_ids.to(self.device), attention_mask.to(self.device)
         )
-
+    
+        st.info(f"Per-token KL: {per_token_kl}")
+        st.info(f"Mean per sample KL: {mean_per_sample_kl}")
         # Convert to numpy for easier handling
-        kl_values = per_token_kl.cpu().numpy().flatten()
+        kl_values = per_token_kl.cpu().float().numpy().flatten()
 
         # Get tokens (excluding first token since KL is computed for predictions)
         token_ids = input_ids[0, 1:].cpu().numpy()  # Take first sequence, skip BOS
         tokens = [self.tokenizer.decode([token_id]) for token_id in token_ids]
 
+
+        mean_per_sample = np.mean(mean_per_sample_kl) if len(mean_per_sample_kl) > 1 else mean_per_sample_kl[0]
         # Compute statistics
         statistics = {
             "mean": float(np.mean(kl_values)),
@@ -613,7 +617,7 @@ class KLDivergenceDiffingMethod(DiffingMethod):
             "min": float(np.min(kl_values)),
             "max": float(np.max(kl_values)),
             "median": float(np.median(kl_values)),
-            "mean_per_sample": float(np.mean(mean_per_sample_kl)),
+            "mean_per_sample": float(mean_per_sample),
         }
 
         return {

@@ -41,6 +41,7 @@ from src.utils.dictionary.training import crosscoder_run_name
 from src.utils.visualization import multi_tab_interface
 from src.utils.dashboards import AbstractOnlineDiffingDashboard, SteeringDashboard, MaxActivationDashboardComponent
 from src.utils.max_act_store import ReadOnlyMaxActStore
+from src.utils.dictionary.steering import run_latent_steering_experiment, get_crosscoder_latent, display_steering_results
 
 
 class CrosscoderDiffingMethod(DiffingMethod):
@@ -169,12 +170,26 @@ class CrosscoderDiffingMethod(DiffingMethod):
                         latent_activation_cache=latent_activations_cache,
                         split_of_cache=self.method_cfg.analysis.latent_activations.split,
                         device=self.method_cfg.analysis.latent_activations.cache_device,
+                        save_path=model_results_dir,
                     )
-                    
-                make_plots(
-                    dictionary_name=dictionary_name,
-                    plots_dir=model_results_dir,
-                )
+
+                try:
+                    make_plots(
+                        dictionary_name=dictionary_name,
+                        plots_dir=model_results_dir / "plots",
+                    )
+                except Exception as e:
+                    logger.error(f"Error making plots for {dictionary_name}: {e}")
+
+                if self.method_cfg.analysis.latent_steering.enabled:
+                    logger.info(f"Running latent steering experiment for layer {layer_idx}")
+                    run_latent_steering_experiment(
+                        method=self,
+                        get_latent_fn=get_crosscoder_latent,
+                        dictionary_name=dictionary_name,
+                        results_dir=model_results_dir,
+                        layer=layer_idx,
+                    )
 
             logger.info(f"Successfully completed layer {layer_idx}")
 
@@ -292,7 +307,8 @@ class CrosscoderDiffingMethod(DiffingMethod):
             [
                 ("📊 MaxAct Examples", lambda: self._render_maxact_tab(selected_cc_info)),
                 ("🔥 Online Inference", lambda: CrosscoderOnlineDashboard(self, selected_cc_info).display()),
-                ("🎯 Steering", lambda: CrosscoderSteeringDashboard(self, selected_cc_info).display()),
+                ("🎯 Online Steering", lambda: CrosscoderSteeringDashboard(self, selected_cc_info).display()),
+                ("📋 Steering Results", lambda: self._render_steering_results_tab(selected_cc_info)),
                 ("📈 Latent Statistics", lambda: self._render_latent_statistics_tab(selected_cc_info)),
                 ("🎨 Plots", lambda: self._render_plots_tab(selected_cc_info)),
             ],
@@ -462,6 +478,18 @@ class CrosscoderDiffingMethod(DiffingMethod):
                     b64 = base64.b64encode(f.read()).decode("utf-8")
                 st.markdown(f"<iframe src='data:application/pdf;base64,{b64}' width='100%' height='400'></iframe>", unsafe_allow_html=True)
 
+    def _render_steering_results_tab(self, selected_cc_info):
+        """Render the Steering Results tab displaying saved experiment results."""
+        
+        dictionary_name = selected_cc_info['dictionary_name']
+        layer = selected_cc_info['layer']
+        model_results_dir = selected_cc_info['path']
+        
+        st.markdown(f"**Selected CrossCoder:** Layer {layer} - {dictionary_name}")
+        
+        # Display the steering results using the imported function
+        display_steering_results(model_results_dir, dictionary_name, self.cfg)
+
     # --------------------------- Activation computation ---------------------------
     @torch.no_grad()
     def compute_crosscoder_activations_for_tokens(self, dictionary_name: str, input_ids: torch.Tensor, attention_mask: torch.Tensor, layer: int):
@@ -573,13 +601,13 @@ class CrosscoderSteeringDashboard(SteeringDashboard):
         self._layer = cc_info["layer"]
         self._cc_model = None
         try:
-            latent_df = self.method._load_latent_df(self.sae_info['dictionary_name'])
+            latent_df = self.method._load_latent_df(self.cc_info['dictionary_name'])
             if 'max_act_validation' in latent_df.columns:
                 self._max_acts = latent_df['max_act_validation']
             elif 'max_act_train' in latent_df.columns:
                 self._max_acts = latent_df['max_act_train']
             else:
-                raise KeyError(f"Neither 'max_act_validation' nor 'max_act_train' found in latent dataframe for {self.sae_info['dictionary_name']}")
+                raise KeyError(f"Neither 'max_act_validation' nor 'max_act_train' found in latent dataframe for {self.cc_info['dictionary_name']}")
         except Exception as e:
             st.error(f"❌ Maximum activations not yet collected for dictionary '{cc_info['dictionary_name']}'")
             st.info("💡 Please run the analysis pipeline to collect maximum activations before using the steering dashboard.")

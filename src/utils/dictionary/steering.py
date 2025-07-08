@@ -9,7 +9,33 @@ from pathlib import Path
 from tqdm import tqdm
 
 from tiny_dashboard.utils import apply_chat
+import re
+
 from src.utils.dictionary.utils import load_latent_df, load_dictionary_model
+
+
+def _clean_generated_text(text: str, end_of_turn_token: str = None) -> str:
+    """
+    Clean generated text by collapsing repeated end_of_turn tokens into a single one.
+    
+    Args:
+        text: Generated text to clean
+        end_of_turn_token: End of turn token to collapse (if None, no cleaning)
+        
+    Returns:
+        Cleaned text with collapsed end_of_turn tokens
+    """
+    if end_of_turn_token is None:
+        return text
+    
+    # Escape special regex characters in the token
+    escaped_token = re.escape(end_of_turn_token)
+    
+    # Replace multiple consecutive end_of_turn tokens with a single one
+    pattern = f"({escaped_token})+"
+    cleaned_text = re.sub(pattern, end_of_turn_token, text)
+    
+    return cleaned_text
 
 def load_prompts(prompts_file: str) -> List[str]:
     with open(prompts_file, 'r') as f:
@@ -21,6 +47,25 @@ def get_sae_latent(latent_idx: int, dictionary_model) -> torch.Tensor:
     assert 0 <= latent_idx < dict_size, f"Latent index {latent_idx} out of range [0, {dict_size})"
 
     decoder_vector = dictionary_model.decoder.weight[:, latent_idx]  # [activation_dim]
+    return decoder_vector.detach()
+
+def get_crosscoder_latent(latent_idx: int, dictionary_model: str, layer: int = 1) -> torch.Tensor:
+    """
+    Get decoder vector for specified latent index from a crosscoder model.
+    
+    Args:
+        latent_idx: Latent index to extract
+        dictionary_model: Crosscoder dictionary model
+        
+    Returns:
+        Decoder vector [num_layers, activation_dim] for the specified latent
+    """
+    dict_size = dictionary_model.dict_size
+    assert 0 <= latent_idx < dict_size, f"Latent index {latent_idx} out of range [0, {dict_size})"
+
+    # CrossCoder decoder weight shape: [num_layers, dict_size, activation_dim]
+    # We want the decoder vector for latent idx: decoder.weight[:, latent_idx, :]
+    decoder_vector = dictionary_model.decoder.weight[layer, latent_idx, :]  # [num_layers, activation_dim]
     return decoder_vector.detach()
 
 def run_latent_steering_experiment(
@@ -88,6 +133,7 @@ def latent_steering_experiment(
     tokenizer,                 # Tokenizer
     layer: int,                # Layer to apply steering to
     largest: bool = False,      # Whether to use largest latents
+    absolute: bool = True,     # Whether to use absolute values of latents
     batch_size: int = 8,       # Batch size for parallel generation
     max_length: int = 50,      # Max tokens to generate
     temperature: float = 1.0,  # Generation temperature
@@ -145,6 +191,12 @@ def latent_steering_experiment(
     }
     
     # Top-K latent selection
+    if absolute:
+        latent_df[target_column] = latent_df[target_column].abs()
+    
+    # Drop rows with NaN values
+    latent_df = latent_df.dropna(subset=[target_column])
+    
     if largest:
         top_latents = latent_df.nlargest(k, target_column)
     else:
@@ -401,13 +453,14 @@ def save_results_to_csv(results: List[Dict], filepath: str) -> None:
     logger.info(f"Saved {len(results)} results to {filepath}")
 
 
-def display_steering_results(results_dir: Path, dictionary_name: str) -> None:
+def display_steering_results(results_dir: Path, dictionary_name: str, cfg=None) -> None:
     """
     Display steering experiment results in Streamlit interface.
     
     Args:
         results_dir: Directory containing steering results CSV files
         dictionary_name: Name of the dictionary/SAE model
+        cfg: Configuration object containing model settings (optional)
     """
     import streamlit as st
     from pathlib import Path
@@ -532,18 +585,37 @@ def display_steering_results(results_dir: Path, dictionary_name: str) -> None:
     # Group by prompt and model
     grouped_results = _group_results_for_display(filtered_results)
     
-    # Add comprehensive copy button for all filtered results
-    st.markdown("#### Export All Results")
-    all_results_text = _format_all_results_for_llm_analysis(selected_latent, int(latent_target_value), grouped_results, selected_modes, selected_factors, selected_model)
+    # Export options
+    st.markdown("#### Export Options")
     
-    st.download_button(
-        label="📋 Copy All Results for LLM Analysis",
-        data=all_results_text,
-        file_name=f"steering_analysis_latent{selected_latent}_{selected_model}_all_prompts.txt",
-        mime="text/plain",
-        help="Download formatted text containing all filtered results for LLM interpretability analysis",
-        use_container_width=True
-    )
+    col_export1, col_export2 = st.columns(2)
+    
+    with col_export1:
+        # Current latent export
+        all_results_text = _format_all_results_for_llm_analysis(
+            selected_latent, int(latent_target_value), grouped_results, 
+            selected_modes, selected_factors, selected_model, cfg
+        )
+        
+        st.download_button(
+            label="📋 Export Current Latent",
+            data=all_results_text,
+            file_name=f"steering_analysis_latent{selected_latent}_{selected_model}.txt",
+            mime="text/plain",
+            help="Download formatted text for current latent and filters",
+            use_container_width=True
+        )
+    
+    with col_export2:
+        # All latents export
+        if st.button(
+            "📦 Download All Latents", 
+            help="Download steering analysis for all available latents with current filter settings",
+            use_container_width=True
+        ):
+            _download_all_latents_analysis(
+                df, unique_latents, selected_model, selected_modes, selected_factors, cfg
+            )
     
     # Display results for each prompt
     st.markdown("#### Steering Results by Prompt")
@@ -558,7 +630,9 @@ def display_steering_results(results_dir: Path, dictionary_name: str) -> None:
             # Show baseline first
             baseline = group_data['baseline']
             st.markdown("##### 🔹 Baseline (No Steering)")
-            st.code(baseline['generated_text'], language="text", wrap_lines=True)
+            end_of_turn_token = getattr(cfg.model, 'end_of_turn_token', None) if cfg else None
+            baseline_cleaned = _clean_generated_text(baseline['generated_text'], end_of_turn_token)
+            st.code(baseline_cleaned, language="text", wrap_lines=True)
             
             # Show steered results
             if group_data['steered']:
@@ -578,8 +652,10 @@ def display_steering_results(results_dir: Path, dictionary_name: str) -> None:
                         # Compact stats at the top (only steering factor)
                         st.caption(f"🎯 Steering Factor: {result['steering_factor']:.2f}")
                         
-                        # Full-width generated text
-                        st.code(result['generated_text'], language="text", wrap_lines=True)
+                        # Full-width generated text (cleaned)
+                        end_of_turn_token = getattr(cfg.model, 'end_of_turn_token', None) if cfg else None
+                        cleaned_text = _clean_generated_text(result['generated_text'], end_of_turn_token)
+                        st.code(cleaned_text, language="text", wrap_lines=True)
                         
                         st.markdown("---")
             else:
@@ -693,7 +769,71 @@ def _format_results_for_llm_analysis(latent_idx: int, group_data: Dict, model_ty
     return "\n".join(output)
 
 
-def _format_all_results_for_llm_analysis(latent_idx: int, target_value_idx: int, all_grouped_results: Dict, selected_modes: List[str], selected_factors: List[float], selected_model: str) -> str:
+def _download_all_latents_analysis(df: pd.DataFrame, unique_latents: List[int], selected_model: str, selected_modes: List[str], selected_factors: List[float], cfg=None) -> None:
+    """
+    Generate and download steering analysis for all available latents.
+    
+    Args:
+        df: Full results dataframe
+        unique_latents: List of all unique latent indices
+        selected_model: Selected model type
+        selected_modes: Selected steering modes
+        selected_factors: Selected steering factor percentages
+        cfg: Configuration object containing model settings (optional)
+    """
+    import streamlit as st
+    import zipfile
+    from io import BytesIO
+    
+    # Create a ZIP file in memory
+    zip_buffer = BytesIO()
+    
+    with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+        for latent_idx in unique_latents:
+            # Filter results for this latent
+            latent_results = df[(df['latent_idx'] == latent_idx) | (df['is_baseline'] == True)]
+            target_value_idx = int(df[df['latent_idx'] == latent_idx]['target_value'].iloc[0])
+            
+            # Apply model and other filters
+            if selected_modes and selected_factors:
+                filtered_results = latent_results[
+                    ((latent_results['is_baseline'] == True) & (latent_results['model_type'] == selected_model)) |
+                    ((latent_results['model_type'] == selected_model) & 
+                     (latent_results['steering_mode'].isin(selected_modes)) & 
+                     (latent_results['steering_factor_percentage'].isin(selected_factors)))
+                ]
+            else:
+                filtered_results = latent_results[
+                    (latent_results['is_baseline'] == True) & (latent_results['model_type'] == selected_model)
+                ]
+            
+            if len(filtered_results) > 0:
+                # Group results for this latent
+                grouped_results = _group_results_for_display(filtered_results)
+                
+                # Format results for this latent
+                formatted_text = _format_all_results_for_llm_analysis(
+                    latent_idx, target_value_idx, grouped_results, 
+                    selected_modes, selected_factors, selected_model, cfg
+                )
+                
+                # Add to ZIP file
+                filename = f"latent_{latent_idx}_{selected_model}.txt"
+                zip_file.writestr(filename, formatted_text)
+    
+    zip_buffer.seek(0)
+    
+    # Offer download
+    st.download_button(
+        label="💾 Download ZIP",
+        data=zip_buffer.getvalue(),
+        file_name=f"steering_analysis_all_latents_{selected_model}.zip",
+        mime="application/zip",
+        help="Download ZIP file containing analysis for all latents"
+    )
+
+
+def _format_all_results_for_llm_analysis(latent_idx: int, target_value_idx: int, all_grouped_results: Dict, selected_modes: List[str], selected_factors: List[float], selected_model: str, cfg=None) -> str:
     """
     Format all steering results into one comprehensive text for LLM analysis.
     
@@ -740,7 +880,9 @@ def _format_all_results_for_llm_analysis(latent_idx: int, target_value_idx: int,
         
         # Baseline
         output.append("BASELINE (No Steering):")
-        output.append(baseline['generated_text'])
+        end_of_turn_token = getattr(cfg.model, 'end_of_turn_token', None) if cfg else None
+        baseline_cleaned = _clean_generated_text(baseline['generated_text'], end_of_turn_token)
+        output.append(baseline_cleaned)
         output.append("")
         
         # Steered results
@@ -760,7 +902,8 @@ def _format_all_results_for_llm_analysis(latent_idx: int, target_value_idx: int,
             for (mode, factor_pct), mode_results in sorted_configs:
                 for result in mode_results:
                     output.append(f"[Mode: {mode}, Strength: {factor_pct}× = {result['steering_factor']:.2f}]")
-                    output.append(result['generated_text'])
+                    steered_cleaned = _clean_generated_text(result['generated_text'], end_of_turn_token)
+                    output.append(steered_cleaned)
                     output.append("")
         else:
             output.append("STEERED GENERATIONS:")

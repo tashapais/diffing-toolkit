@@ -62,18 +62,18 @@ def build_push_crosscoder_latent_df(
         latent_df[f_idx]["enc_norm_diff"] = norm_diff.item()
 
     decoder_cos_sims = cosine_similarity(
-        crosscoder.decoder.weight[base_layer],
-        crosscoder.decoder.weight[ft_layer],
+        crosscoder.decoder.weight[base_layer], # [num_features, activation_dim]
+        crosscoder.decoder.weight[ft_layer], # [num_features, activation_dim]
         dim=1,
-    )
+    ) 
     for f_idx, cos_sim in enumerate(decoder_cos_sims):
         latent_df[f_idx]["dec_cos_sim"] = cos_sim.item()
 
     # Encoder cos sims
     enc_cos_sims = cosine_similarity(
-        crosscoder.encoder.weight[base_layer],
-        crosscoder.encoder.weight[ft_layer],
-        dim=1,
+        crosscoder.encoder.weight[base_layer], # [activation_dim, num_features]
+        crosscoder.encoder.weight[ft_layer], # [activation_dim, num_features]
+        dim=0,
     )
     for f_idx, cos_sim in enumerate(enc_cos_sims):
         latent_df[f_idx]["enc_cos_sim"] = cos_sim.item()

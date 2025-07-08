@@ -177,6 +177,7 @@ class SAEDifferenceMethod(DiffingMethod):
                         latent_activation_cache=latent_activations_cache,
                         split_of_cache=self.method_cfg.analysis.latent_activations.split,
                         device=self.method_cfg.analysis.latent_activations.cache_device,
+                        save_path=model_results_dir,
                     )
 
                 try:
@@ -352,7 +353,7 @@ class SAEDifferenceMethod(DiffingMethod):
             [
                 ("📊 MaxAct Examples", lambda: self._render_maxact_tab(selected_sae_info)),
                 ("🔥 Online Inference", lambda: SAEDifferenceOnlineDashboard(self, selected_sae_info).display()),
-                ("🎯 Steering", lambda: SAESteeringDashboard(self, selected_sae_info).display()),
+                ("🎯 Online Steering", lambda: SAESteeringDashboard(self, selected_sae_info).display()),
                 ("📋 Steering Results", lambda: self._render_steering_results_tab(selected_sae_info)),
                 ("📈 Latent Statistics", lambda: self._render_latent_statistics_tab(selected_sae_info)),
                 ("🎨 Plots", lambda: self._render_plots_tab(selected_sae_info)),
@@ -724,7 +725,7 @@ class SAEDifferenceMethod(DiffingMethod):
         st.markdown(f"**Selected SAE:** Layer {layer} - {dictionary_name}")
         
         # Display the steering results using the imported function
-        display_steering_results(model_results_dir, dictionary_name)
+        display_steering_results(model_results_dir, dictionary_name, self.cfg)
 
     @torch.no_grad()
     def compute_sae_activations_for_tokens(

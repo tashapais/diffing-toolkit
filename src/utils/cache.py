@@ -28,6 +28,9 @@ class DifferenceCache:
         else:
             assert len(self.activation_cache_1) == len(self.activation_cache_2), f"Lengths do not match: {len(self.activation_cache_1)} != {len(self.activation_cache_2)}"  
             self._len = len(self.activation_cache_1)
+            self._sequence_ranges = self.activation_cache_1.sequence_ranges
+
+        assert self._sequence_ranges is not None, "Sequence ranges are not set"
 
     def __len__(self):
         return self._len
