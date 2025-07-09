@@ -351,12 +351,12 @@ class SAEDifferenceMethod(DiffingMethod):
         
         multi_tab_interface(
             [
-                ("📊 MaxAct Examples", lambda: self._render_maxact_tab(selected_sae_info)),
+                ("📈 Latent Statistics", lambda: self._render_latent_statistics_tab(selected_sae_info)),
+                ("📋 Steering Results", lambda: self._render_steering_results_tab(selected_sae_info)),
                 ("🔥 Online Inference", lambda: SAEDifferenceOnlineDashboard(self, selected_sae_info).display()),
                 ("🎯 Online Steering", lambda: SAESteeringDashboard(self, selected_sae_info).display()),
-                ("📋 Steering Results", lambda: self._render_steering_results_tab(selected_sae_info)),
-                ("📈 Latent Statistics", lambda: self._render_latent_statistics_tab(selected_sae_info)),
                 ("🎨 Plots", lambda: self._render_plots_tab(selected_sae_info)),
+                ("📊 MaxAct Examples", lambda: self._render_maxact_tab(selected_sae_info)),
             ],
             "SAE Difference Analysis",
         )

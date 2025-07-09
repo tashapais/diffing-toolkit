@@ -305,12 +305,12 @@ class CrosscoderDiffingMethod(DiffingMethod):
         # Tabs
         multi_tab_interface(
             [
-                ("📊 MaxAct Examples", lambda: self._render_maxact_tab(selected_cc_info)),
-                ("🔥 Online Inference", lambda: CrosscoderOnlineDashboard(self, selected_cc_info).display()),
-                ("🎯 Online Steering", lambda: CrosscoderSteeringDashboard(self, selected_cc_info).display()),
-                ("📋 Steering Results", lambda: self._render_steering_results_tab(selected_cc_info)),
                 ("📈 Latent Statistics", lambda: self._render_latent_statistics_tab(selected_cc_info)),
+                ("📋 Steering Results", lambda: self._render_steering_results_tab(selected_cc_info)),
+                ("🎯 Online Steering", lambda: CrosscoderSteeringDashboard(self, selected_cc_info).display()),
+                ("🔥 Online Inference", lambda: CrosscoderOnlineDashboard(self, selected_cc_info).display()),
                 ("🎨 Plots", lambda: self._render_plots_tab(selected_cc_info)),
+                ("📊 MaxAct Examples", lambda: self._render_maxact_tab(selected_cc_info)),
             ],
             "CrossCoder Analysis",
         )

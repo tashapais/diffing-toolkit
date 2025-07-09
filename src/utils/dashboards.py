@@ -926,9 +926,6 @@ class MaxActivationDashboardComponent:
                 
                 # Shape assertion
                 assert len(tokens) == len(scores_per_token), f"Token/score mismatch: {len(tokens)} tokens vs {len(scores_per_token)} scores"
-                
-                # Normalize scores (subtract minimum to ensure non-negative)
-                scores_per_token = scores_per_token - scores_per_token.min()
             else:
                 # Fallback to basic display if details not available
                 tokens = self.max_store.tokenizer.convert_ids_to_tokens(example["input_ids"])
@@ -1103,10 +1100,14 @@ class MaxActivationDashboardComponent:
             total_loaded = len(loaded_examples)
             dataset_fractions = {name: count / total_loaded for name, count in dataset_counts.items()}
             
-            # Display dataset distribution
-            if len(dataset_counts) > 1:
-                fraction_parts = [f"{name}: {fraction:.1%}" for name, fraction in dataset_fractions.items()]
-                st.caption(f"Dataset distribution in loaded examples: {', '.join(fraction_parts)}")
+            # Display dataset distribution (always show, even for single datasets)
+            if len(dataset_counts) >= 1:
+                if len(dataset_counts) == 1:
+                    dataset_name = list(dataset_counts.keys())[0]
+                    st.caption(f"Dataset: {dataset_name} ({total_loaded} examples)")
+                else:
+                    fraction_parts = [f"{name}: {fraction:.1%}" for name, fraction in dataset_fractions.items()]
+                    st.caption(f"Dataset distribution in loaded examples: {', '.join(fraction_parts)}")
         
         # Build filter context message
         filter_parts = []
