@@ -37,3 +37,18 @@ analysis:
     max_num_samples: 10_000
     split: "train"
     overwrite: false
+
+  component_steering:
+    enabled: true
+    prompts_file: "resources/steering_prompts.txt"
+    k: 10  # Number of first components to test (0, 1, 2, ..., k-1)
+    overwrite: false
+    max_length: 512
+    temperature: 1.0
+    do_sample: true
+    device: "cuda"
+    use_chat_formatting: true
+    enable_thinking: false
+    steering_factors_percentages: [-1.5, -1.0, -0.75, -0.5, -0.25, -0.125, 0.125, 0.25, 0.5, 0.75, 1.0, 1.5]
+    steering_modes: ["all_tokens", "prompt_only"]
+

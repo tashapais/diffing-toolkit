@@ -76,5 +76,21 @@ analysis:
     max_num_samples: 50000 # Maximum number of samples to collect per dataset
     cache_device: "cuda"
 
+  latent_steering:
+    enabled: true
+    overwrite: false
+    prompts_file: "resources/steering_prompts.txt"
+    target_column: "dec_norm_diff"
+    k: 10
+    largest: false
+    max_length: 512
+    temperature: 1.0
+    do_sample: false
+    device: "cuda"
+    use_chat_formatting: true
+    enable_thinking: false
+    steering_factors_percentages: [-0.5, 0.5, 0.8, 1.0, 1.5] # of max_activation
+    steering_modes: ["all_tokens", "prompt_only"]
+
 upload:
   model: true

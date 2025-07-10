@@ -488,7 +488,7 @@ class CrosscoderDiffingMethod(DiffingMethod):
         st.markdown(f"**Selected CrossCoder:** Layer {layer} - {dictionary_name}")
         
         # Display the steering results using the imported function
-        display_steering_results(model_results_dir, dictionary_name, self.cfg)
+        display_steering_results(model_results_dir, self.cfg)
 
     # --------------------------- Activation computation ---------------------------
     @torch.no_grad()

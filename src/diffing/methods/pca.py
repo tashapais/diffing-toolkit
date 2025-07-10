@@ -26,6 +26,8 @@ import streamlit as st
 from tqdm import tqdm, trange
 from torchdr import IncrementalPCA
 import shutil
+import pickle
+from pathlib import Path
 
 from .diffing_method import DiffingMethod
 from src.utils.activations import get_layer_indices, load_activation_dataset_from_config, load_activation_datasets_from_config
@@ -36,9 +38,12 @@ from src.utils.dictionary.training import (
     recompute_normalizer,
 )
 from src.utils.configs import get_model_configurations, get_dataset_configurations
-from src.utils.dashboards import AbstractOnlineDiffingDashboard, MaxActivationDashboardComponent
+from src.utils.dashboards import AbstractOnlineDiffingDashboard, MaxActivationDashboardComponent, SteeringDashboard
 from src.utils.max_act_store import MaxActStore, ReadOnlyMaxActStore
 from src.utils.cache import SampleCache
+from src.utils.dictionary.steering import display_steering_results
+
+
 
 class PCAMethod(DiffingMethod):
     """
@@ -67,6 +72,7 @@ class PCAMethod(DiffingMethod):
         self.results_dir.mkdir(parents=True, exist_ok=True)
 
         self._component_dfs = {}
+        self._pca_model_cache = {}  # Cache for loaded PCA models
 
         self.target_display_names = {
             "difference_ftb": "FT - Base",
@@ -89,6 +95,76 @@ class PCAMethod(DiffingMethod):
             self.method_cfg.training.epochs = 1
             self.method_cfg.training.num_validation_samples = 5_000_000 # Not used
 
+    def _generate_config_tag(self) -> str:
+        """
+        Generate a configuration tag based on dataset settings.
+        
+        Returns:
+            Human-readable tag representing the dataset configuration
+        """
+        datasets = self.method_cfg.datasets
+        
+        # Create list of enabled datasets
+        enabled_datasets = []
+        if datasets.use_chat_dataset:
+            enabled_datasets.append("chat")
+        if datasets.use_pretraining_dataset:
+            enabled_datasets.append("pretrain")
+        if datasets.use_training_dataset:
+            enabled_datasets.append("train")
+        
+        # Handle edge case of no datasets
+        if not enabled_datasets:
+            raise ValueError("No datasets enabled")
+
+        
+        # Create tag
+        if len(enabled_datasets) == 3:
+            return "all_datasets"
+        else:
+            return "_".join(sorted(enabled_datasets))
+
+    def get_pca_latent(self, latent_idx: int, layer: int, cfg: DictConfig) -> torch.Tensor:
+        """
+        Get PCA component vector for steering.
+        
+        Args:
+            latent_idx: Component index to retrieve
+            layer: Layer number
+            cfg: Configuration containing results directory
+            
+        Returns:
+            PCA component vector [activation_dim] for steering
+        """
+        target = self.method_cfg.training.target
+        config_tag = self._generate_config_tag()
+        cache_key = (layer, target, config_tag)
+        
+        # Check if model is already cached
+        if cache_key not in self._pca_model_cache:
+            # Construct path to PCA model
+            pca_model_path = (
+                self.results_dir / "pca" / f"layer_{layer}" / target / config_tag / "pca_model.pkl"
+            )
+            
+            if not pca_model_path.exists():
+                raise FileNotFoundError(f"PCA model not found at {pca_model_path}")
+            
+            # Load and cache the PCA model
+            self._pca_model_cache[cache_key] = self._load_pca_model(pca_model_path)
+        
+        pca_model = self._pca_model_cache[cache_key]
+        
+        # Validate component index
+        n_components = pca_model.n_components
+        if not (0 <= latent_idx < n_components):
+            raise IndexError(f"Component index {latent_idx} out of range [0, {n_components})")
+        
+        # Return the specific component vector
+        component_vector = pca_model.components_[latent_idx]  # [activation_dim]
+        
+        return component_vector.detach()
+
 
     def run(self) -> Dict[str, Any]:
         """
@@ -103,6 +179,10 @@ class PCAMethod(DiffingMethod):
         logger.info(f"Starting PCA difference training for layers: {self.layers}")
         logger.info(f"Training target: {self.method_cfg.training.target}")
 
+        # Generate config tag for this training run
+        config_tag = self._generate_config_tag()
+        logger.info(f"Configuration tag: {config_tag}")
+
         for layer_idx in self.layers:
             logger.info(f"Processing layer {layer_idx}")
 
@@ -112,6 +192,7 @@ class PCAMethod(DiffingMethod):
                 / "pca"
                 / f"layer_{layer_idx}"
                 / target
+                / config_tag
             )
             model_results_dir.mkdir(parents=True, exist_ok=True)
 
@@ -120,7 +201,7 @@ class PCAMethod(DiffingMethod):
                 or self.method_cfg.training.overwrite
             ):
                 # Train PCA on differences for this layer
-                logger.info(f"Training PCA for layer {layer_idx} with target {target}")
+                logger.info(f"Training PCA for layer {layer_idx} with target {target} and config {config_tag}")
                 training_metrics, model_path = self._train_pca_for_layer(
                     layer_idx, target, model_results_dir,
                 )
@@ -428,12 +509,155 @@ class PCAMethod(DiffingMethod):
 
         self._collect_maximum_activating_examples(pca, layer_idx, analysis_dir, target)
 
-        
+        if self.method_cfg.analysis.component_steering.enabled:
+            logger.info(f"Running latent steering experiment for layer {layer_idx}")
+            self._run_pca_latent_steering_experiment(
+                layer_idx=layer_idx,
+                target=target,
+                model_results_dir=model_results_dir,
+                pca=pca,
+            )
 
         logger.info(f"Analysis completed for layer {layer_idx}")
-    
-    
 
+    def _run_pca_latent_steering_experiment(
+        self, layer_idx: int, target: str, model_results_dir: Path, pca
+    ) -> None:
+        """Run latent steering experiment for PCA components."""
+        from src.utils.dictionary.steering import latent_steering_experiment, save_results_to_csv, load_prompts
+        from src.utils.max_act_store import ReadOnlyMaxActStore
+        
+        component_steering_cfg = self.method_cfg.analysis.component_steering
+        
+        # Setup results directory
+        results_dir = model_results_dir / "latent_steering" 
+        # Note: We use the latent steering name for consistency with other models and such that the display function works
+        results_dir.mkdir(parents=True, exist_ok=True)
+        
+        results_file = results_dir / f"{component_steering_cfg.prompts_file.split('/')[-1].split('.')[0]}.csv"
+        if not component_steering_cfg.overwrite and results_file.exists():
+            logger.info(f"Skipping latent steering experiment because results already exist at {results_file}")
+            return
+        
+        # Load prompts
+        prompts = load_prompts(component_steering_cfg.prompts_file)
+        
+        # Get steering configuration
+        k = component_steering_cfg.k
+        
+        # Extract max activations from ReadOnlyMaxActStore
+        selected_latents = self._extract_pca_max_activations(
+            model_results_dir, k, pca.n_components
+        )
+        
+        if len(selected_latents) == 0:
+            logger.warning("No valid components found for steering experiment")
+            return
+        
+        # Define get_latent_fn for PCA components
+        def get_latent_fn(latent_idx: int) -> torch.Tensor:
+            return self.get_pca_latent(
+                latent_idx=latent_idx,
+                layer=layer_idx,
+                cfg=self.cfg
+            )
+        
+        # Run the steering experiment
+        results = latent_steering_experiment(
+            get_latent_fn=get_latent_fn,
+            prompts=prompts,
+            selected_latents=selected_latents,
+            base_model=self.base_model,
+            finetuned_model=self.finetuned_model,
+            tokenizer=self.tokenizer,
+            layer=layer_idx,
+            batch_size=48,
+            max_length=component_steering_cfg.max_length,
+            temperature=component_steering_cfg.temperature,
+            do_sample=component_steering_cfg.do_sample,
+            device=component_steering_cfg.device,
+            use_chat_formatting=component_steering_cfg.use_chat_formatting,
+            enable_thinking=component_steering_cfg.enable_thinking,
+            steering_factors_percentages=component_steering_cfg.steering_factors_percentages,
+            steering_modes=component_steering_cfg.steering_modes,
+        )
+        
+        # Save results
+        save_results_to_csv(results, results_file)
+        logger.info(f"PCA latent steering experiment completed for layer {layer_idx}")
+
+    def _extract_pca_max_activations(
+        self, model_results_dir: Path, k: int, n_components: int
+    ) -> List[Dict[str, Any]]:
+        """
+        Extract max activations for the first k PCA components.
+        
+        Args:
+            model_results_dir: Directory containing analysis results
+            k: Number of components to select (takes first k components: 0, 1, 2, ..., k-1)
+            n_components: Total number of PCA components
+            
+        Returns:
+            List of dictionaries with 'latent_idx' and 'max_act' for the first k components
+        """
+        from src.utils.max_act_store import ReadOnlyMaxActStore
+        
+        # Validate k
+        k = min(k, n_components)
+        
+        # Try to extract max activations from databases
+        analysis_dir = model_results_dir / "analysis"
+        pos_examples_path = analysis_dir / "positive_examples.db"
+        neg_examples_path = analysis_dir / "negative_examples.db"
+        
+        component_max_acts = {}
+        use_default_max_act = False
+        
+        # Check if both databases exist
+        if not pos_examples_path.exists() or not neg_examples_path.exists():
+            logger.warning(f"Missing max activation databases in {analysis_dir}")
+            logger.warning("Using default max_act value of 100.0 for all components")
+            use_default_max_act = True
+        else:
+            # Load max act stores
+            pos_store = ReadOnlyMaxActStore(pos_examples_path, tokenizer=self.tokenizer)
+            neg_store = ReadOnlyMaxActStore(neg_examples_path, tokenizer=self.tokenizer)
+            
+            # Extract max activations for the first k components
+            for component_idx in range(k):
+                # Get max positive activation for this component
+                pos_examples = pos_store.get_top_examples(latent_idx=component_idx, limit=1)
+                max_pos_act = pos_examples[0]['max_score'] if pos_examples else 0.0
+                
+                # Get max negative activation for this component (stored as positive scores)
+                neg_examples = neg_store.get_top_examples(latent_idx=component_idx, limit=1)
+                max_neg_act = neg_examples[0]['max_score'] if neg_examples else 0.0
+                
+                # Take absolute maximum of positive and negative
+                max_act = max(abs(max_pos_act), abs(max_neg_act))
+                component_max_acts[component_idx] = max_act
+                
+            logger.info(f"Successfully extracted max activations for {len(component_max_acts)} components")
+        
+        # Create selected latents list for the first k components
+        selected_latents = []
+        for component_idx in range(k):
+            if use_default_max_act:
+                max_act = 100.0
+            else:
+                max_act = component_max_acts.get(component_idx, 100.0)
+                
+            selected_latents.append({
+                'latent_idx': component_idx,
+                'max_act': max_act,
+            })
+        
+        logger.info(f"Selected first {len(selected_latents)} components for steering experiment")
+        if not use_default_max_act:
+            max_acts = [latent['max_act'] for latent in selected_latents]
+            logger.info(f"Max activation range: [{min(max_acts):.4f}, {max(max_acts):.4f}]")
+        
+        return selected_latents
 
     def _load_pca_model(self, model_path: Path) -> Dict[str, Any]:
         """Load PCA model state from disk."""
@@ -524,6 +748,8 @@ class PCAMethod(DiffingMethod):
         
         logger.info(f"Saved explained variance plot to {plot_path}")
 
+
+
     def visualize(self) -> None:
         """
         Create Streamlit visualization for PCA results.
@@ -561,15 +787,19 @@ class PCAMethod(DiffingMethod):
         )
 
         pcas_for_selected_layer = pcas_by_layer[selected_layer]
-        targets_for_layer = [pca['target'] for pca in pcas_for_selected_layer]
+        
+        # Group by target for this layer
+        pcas_by_target = defaultdict(list)
+        for pca_info in pcas_for_selected_layer:
+            pcas_by_target[pca_info['target']].append(pca_info)
+        
+        targets_for_layer = list(pcas_by_target.keys())
         
         if not targets_for_layer:
             st.warning(f"No trained PCA models found for layer {selected_layer}.")
             return
 
         # Target selection with human-readable names
-        
-        
         # Create display options with human-readable names
         display_options = [self.target_display_names.get(target, target) for target in targets_for_layer]
         
@@ -592,13 +822,63 @@ class PCAMethod(DiffingMethod):
                 selected_target = target
                 break
         
+        # Get PCAs for selected target
+        pcas_for_selected_target = pcas_by_target[selected_target]
+        
+        # Config selection 
+        config_tags = [pca['config_tag'] for pca in pcas_for_selected_target]
+        
+        if not config_tags:
+            st.warning(f"No configurations found for layer {selected_layer}, target {selected_target}.")
+            return
+        
+        # Create human-readable config names
+        config_display_names = {
+            'all_datasets': 'All Datasets',
+            'chat_only': 'Chat Only',
+            'pretrain_only': 'Pretrain Only', 
+            'train_only': 'Train Only',
+            'chat_pretrain': 'Chat + Pretrain',
+            'chat_train': 'Chat + Train',
+            'pretrain_train': 'Pretrain + Train',
+        }
+        
+        config_display_options = [config_display_names.get(tag, tag.replace('_', ' ').title()) for tag in config_tags]
+        
+        # Default to "All Datasets" if available
+        default_config_index = 0
+        if 'all_datasets' in config_tags:
+            default_config_index = config_tags.index('all_datasets')
+        
+        selected_config_display = st.selectbox(
+            "Select Configuration",
+            options=config_display_options,
+            index=default_config_index,
+            help="Choose which dataset configuration to analyze"
+        )
+        
+        # Map back to actual config tag
+        selected_config_tag = None
+        for tag, display_name in config_display_names.items():
+            if display_name == selected_config_display:
+                selected_config_tag = tag
+                break
+        
+        # If not found in standard mapping, try reverse lookup
+        if selected_config_tag is None:
+            for i, display_opt in enumerate(config_display_options):
+                if display_opt == selected_config_display:
+                    selected_config_tag = config_tags[i]
+                    break
+        
         # Find the complete pca_info dictionary
-        for pca_info in pcas_for_selected_layer:
-            if pca_info['target'] == selected_target:
+        selected_pca_info = None
+        for pca_info in pcas_for_selected_target:
+            if pca_info['config_tag'] == selected_config_tag:
                 selected_pca_info = pca_info
                 break
         
-        assert selected_pca_info is not None, "Failed to retrieve selected PCA information"
+        assert selected_pca_info is not None, f"Failed to retrieve PCA info for config {selected_config_tag}"
         
         # Display training metrics if available
         training_metrics_path = selected_pca_info['path'] / "training_metrics.json"
@@ -615,15 +895,17 @@ class PCAMethod(DiffingMethod):
         multi_tab_interface(
             [
                 ("🏆 Component Analysis", lambda: self._render_component_analysis_tab(selected_pca_info)),
-                ("📊 MaxAct Examples", lambda: self._render_max_examples_tab(selected_pca_info)),
+                ("📋 Steering Results", lambda: self._render_steering_results_tab(selected_pca_info)),
                 ("🔥 Online Inference", lambda: PCAOnlineDashboard(self, selected_pca_info).display()),
+                ("🎯 Online Steering", lambda: PCASteeringDashboard(self, selected_pca_info).display()),
                 ("🎨 Plots", lambda: self._render_plots_tab(selected_pca_info)),
+                ("📊 MaxAct Examples", lambda: self._render_max_examples_tab(selected_pca_info)),
             ],
             "PCA Analysis",
         )
 
     def _get_available_pca_directories(self):
-        """Get list of available trained PCA directories by target."""
+        """Get list of available trained PCA directories by target and config tag."""
         pca_base_dir = self.results_dir / "pca"
         if not pca_base_dir.exists():
             return []
@@ -645,32 +927,47 @@ class PCAMethod(DiffingMethod):
             # Scan for target directories in this layer
             for target in valid_targets:
                 target_dir = layer_dir / target
-                if target_dir.is_dir():
-                    # Check if this looks like a valid PCA directory
-                    if ((target_dir / "pca_model.pkl").exists() or 
-                        (target_dir / "training_config.yaml").exists()):
+                if not target_dir.is_dir():
+                    continue
+                
+                # Check for config tag structure
+                for config_dir in target_dir.iterdir():
+                    if config_dir.is_dir() and (config_dir / "pca_model.pkl").exists():
                         available_pcas.append({
                             'layer': layer_num,
                             'target': target,
-                            'path': target_dir,
+                            'config_tag': config_dir.name,
+                            'path': config_dir,
                             'layer_dir': layer_dir
                         })
         
-        # Sort by layer number, then by target
-        available_pcas.sort(key=lambda x: (x['layer'], x['target']))
+        # Sort by layer number, then by target, then by config_tag
+        available_pcas.sort(key=lambda x: (x['layer'], x['target'], x['config_tag']))
         return available_pcas
 
     def _render_component_analysis_tab(self, selected_pca_info):
         """Render component analysis tab with variance explained and component statistics."""
         target = selected_pca_info['target']
         layer = selected_pca_info['layer']
+        config_tag = selected_pca_info['config_tag']
         model_results_dir = selected_pca_info['path']
         
         # Human-readable target name
-        
         target_display = self.target_display_names.get(target, target)
         
-        st.markdown(f"**Selected PCA:** Layer {layer} - {target_display}")
+        # Human-readable config name
+        config_display_names = {
+            'all_datasets': 'All Datasets',
+            'chat_only': 'Chat Only',
+            'pretrain_only': 'Pretrain Only', 
+            'train_only': 'Train Only',
+            'chat_pretrain': 'Chat + Pretrain',
+            'chat_train': 'Chat + Train',
+            'pretrain_train': 'Pretrain + Train',
+        }
+        config_display = config_display_names.get(config_tag, config_tag.replace('_', ' ').title())
+        
+        st.markdown(f"**Selected PCA:** Layer {layer} - {target_display} - {config_display}")
         
         # Load PCA model
         try:
@@ -757,12 +1054,25 @@ class PCAMethod(DiffingMethod):
 
         target = selected_pca_info['target']
         layer = selected_pca_info['layer']
+        config_tag = selected_pca_info['config_tag']
         model_results_dir = selected_pca_info['path']
         
         # Human-readable target name
         target_display = self.target_display_names.get(target, target)
         
-        st.markdown(f"**Selected PCA:** Layer {layer} - {target_display}")
+        # Human-readable config name
+        config_display_names = {
+            'all_datasets': 'All Datasets',
+            'chat_only': 'Chat Only',
+            'pretrain_only': 'Pretrain Only', 
+            'train_only': 'Train Only',
+            'chat_pretrain': 'Chat + Pretrain',
+            'chat_train': 'Chat + Train',
+            'pretrain_train': 'Pretrain + Train',
+        }
+        config_display = config_display_names.get(config_tag, config_tag.replace('_', ' ').title())
+        
+        st.markdown(f"**Selected PCA:** Layer {layer} - {target_display} - {config_display}")
         
         # Look for max examples databases in analysis directory
         analysis_dir = model_results_dir / "analysis"
@@ -821,13 +1131,26 @@ class PCAMethod(DiffingMethod):
         
         target = selected_pca_info['target']
         layer = selected_pca_info['layer']
+        config_tag = selected_pca_info['config_tag']
         model_results_dir = selected_pca_info['path']
         
         # Human-readable target name
         target_display = self.target_display_names.get(target, target)
         
+        # Human-readable config name
+        config_display_names = {
+            'all_datasets': 'All Datasets',
+            'chat_only': 'Chat Only',
+            'pretrain_only': 'Pretrain Only', 
+            'train_only': 'Train Only',
+            'chat_pretrain': 'Chat + Pretrain',
+            'chat_train': 'Chat + Train',
+            'pretrain_train': 'Pretrain + Train',
+        }
+        config_display = config_display_names.get(config_tag, config_tag.replace('_', ' ').title())
+        
         st.markdown("### PCA Analysis Plots")
-        st.markdown(f"**Selected PCA:** Layer {layer} - {target_display}")
+        st.markdown(f"**Selected PCA:** Layer {layer} - {target_display} - {config_display}")
         
         # Look for plots directory
         plots_dir = model_results_dir / "plots"
@@ -882,6 +1205,30 @@ class PCAMethod(DiffingMethod):
             for plot_file in other_plots:
                 st.markdown(f"**{plot_file.stem.replace('_', ' ').title()}**")
                 st.image(str(plot_file), use_container_width=True)
+
+    def _render_steering_results_tab(self, selected_pca_info):
+        """Render the Steering Results tab displaying saved experiment results."""
+        
+        layer = selected_pca_info['layer']
+        config_tag = selected_pca_info['config_tag']
+        model_results_dir = selected_pca_info['path']
+        
+        # Human-readable config name
+        config_display_names = {
+            'all_datasets': 'All Datasets',
+            'chat_only': 'Chat Only',
+            'pretrain_only': 'Pretrain Only', 
+            'train_only': 'Train Only',
+            'chat_pretrain': 'Chat + Pretrain',
+            'chat_train': 'Chat + Train',
+            'pretrain_train': 'Pretrain + Train',
+        }
+        config_display = config_display_names.get(config_tag, config_tag.replace('_', ' ').title())
+        
+        st.markdown(f"**Selected PCA:** Layer {layer} - {self.target_display_names.get(selected_pca_info['target'], selected_pca_info['target'])} - {config_display}")
+        
+        # Display the steering results using the imported function
+        display_steering_results(model_results_dir, self.cfg)
 
     @torch.no_grad()
     def compute_pca_projections_for_tokens(
@@ -1023,17 +1370,23 @@ class PCAOnlineDashboard(AbstractOnlineDiffingDashboard):
     def __init__(self, method_instance, pca_info):
         super().__init__(method_instance)
         self.pca_info = pca_info
-
-        self._pca = None
     
     def _render_streamlit_method_controls(self) -> Dict[str, Any]:
         """Render PCA-specific controls in Streamlit."""
         import streamlit as st
 
-        if self._pca is None:
+        # Get number of components using method's cache
+        target = self.pca_info['target']
+        layer = self.pca_info['layer']
+        config_tag = self.pca_info['config_tag']
+        cache_key = (layer, target, config_tag)
+        
+        # Ensure model is loaded and cached
+        if cache_key not in self.method._pca_model_cache:
             pca_model_path = self.pca_info['path'] / "pca_model.pkl"
-            self._pca = self.method._load_pca_model(pca_model_path)
-        n_components = self._pca.n_components
+            self.method._pca_model_cache[cache_key] = self.method._load_pca_model(pca_model_path)
+        
+        n_components = self.method._pca_model_cache[cache_key].n_components
         
         # Component selection
         selected_component = st.selectbox(
@@ -1051,10 +1404,19 @@ class PCAOnlineDashboard(AbstractOnlineDiffingDashboard):
         """Compute PCA projection statistics."""
         layer = self.pca_info['layer']
         target = self.pca_info['target']
+        config_tag = self.pca_info['config_tag']
         selected_component = kwargs.get('selected_component', 0)
         
+        # Get PCA model from method's cache
+        cache_key = (layer, target, config_tag)
+        if cache_key not in self.method._pca_model_cache:
+            pca_model_path = self.pca_info['path'] / "pca_model.pkl"
+            self.method._pca_model_cache[cache_key] = self.method._load_pca_model(pca_model_path)
+        
+        pca_model = self.method._pca_model_cache[cache_key]
+        
         # Get full PCA projections from the parent method
-        results = self.method.compute_pca_projections_for_tokens(self._pca, target, input_ids, attention_mask, layer)
+        results = self.method.compute_pca_projections_for_tokens(pca_model, target, input_ids, attention_mask, layer)
         
         # Extract values for the selected component only
         component_projections = results['component_projections']  # [seq_len, n_components]
@@ -1077,4 +1439,161 @@ class PCAOnlineDashboard(AbstractOnlineDiffingDashboard):
     
     def _get_title(self) -> str:
         """Get title for PCA analysis."""
-        return "PCA Difference Analysis"
+        config_tag = self.pca_info['config_tag']
+        config_display_names = {
+            'all_datasets': 'All Datasets',
+            'chat_only': 'Chat Only',
+            'pretrain_only': 'Pretrain Only', 
+            'train_only': 'Train Only',
+            'chat_pretrain': 'Chat + Pretrain',
+            'chat_train': 'Chat + Train',
+            'pretrain_train': 'Pretrain + Train',
+        }
+        config_display = config_display_names.get(config_tag, config_tag.replace('_', ' ').title())
+        return f"PCA Difference Analysis - {config_display}"
+
+
+class PCASteeringDashboard(SteeringDashboard):
+    """
+    Steering dashboard for PCA component-based steering.
+    
+    This dashboard allows users to select PCA components and perform latent steering
+    by applying component vectors as steering directions.
+    """
+    
+    def __init__(self, method_instance, pca_info):
+        super().__init__(method_instance)
+        self.pca_info = pca_info
+        self._layer = pca_info['layer']
+    
+    def __hash__(self):
+        return hash((self._layer, self.pca_info['target'], self.pca_info['config_tag']))
+    
+    @property
+    def layer(self) -> int:
+        """Get the layer number for this steering dashboard."""
+        return self._layer
+    
+    def get_latent(self, idx: int) -> torch.Tensor:
+        """
+        Get PCA component vector for specified component index.
+        
+        Args:
+            idx: Component index
+            
+        Returns:
+            PCA component vector [activation_dim] for the specified component
+        """
+        # Use the method's get_pca_latent function with caching
+        return self.method.get_pca_latent(
+            latent_idx=idx,
+            layer=self._layer,
+            cfg=self.method.cfg
+        )
+    
+    def get_dict_size(self) -> int:
+        """Get the number of PCA components."""
+        target = self.pca_info['target']
+        config_tag = self.pca_info['config_tag']
+        cache_key = (self._layer, target, config_tag)
+        
+        # Ensure model is loaded and cached
+        if cache_key not in self.method._pca_model_cache:
+            pca_model_path = self.pca_info['path'] / "pca_model.pkl"
+            self.method._pca_model_cache[cache_key] = self.method._load_pca_model(pca_model_path)
+        
+        return self.method._pca_model_cache[cache_key].n_components
+    
+    def get_max_activation(self, component_idx: int) -> str:
+        """
+        Get the maximum projection value for a specific component.
+        
+        Args:
+            component_idx: Component index
+            
+        Returns:
+            "unknown" since we don't collect component statistics
+        """
+        return "unknown"
+    
+    @st.fragment
+    def _render_latent_selector(self) -> int:
+        """Render component selection UI fragment with session state."""
+        import streamlit as st
+        
+        # Get number of components for validation
+        n_components = self.get_dict_size()
+        
+        # Create unique session state key for this steering dashboard
+        session_key = f"pca_steering_component_idx_layer_{self.layer}_{self.pca_info['target']}"
+        
+        # Initialize session state if not exists
+        if session_key not in st.session_state:
+            st.session_state[session_key] = 0
+        
+        # Ensure the session state value is within valid range
+        if st.session_state[session_key] >= n_components:
+            st.session_state[session_key] = 0
+        
+        component_idx = st.number_input(
+            "Component Index",
+            min_value=0,
+            max_value=n_components - 1,
+            value=st.session_state[session_key],
+            step=1,
+            help=f"Choose which component to steer (0-{n_components - 1})",
+            key=session_key
+        )
+        
+        # Display max projection for the selected component
+        max_proj = self.get_max_activation(component_idx)
+        st.info(f"**Max Projection:** {max_proj}")
+        
+        return component_idx
+    
+    def _render_streamlit_method_controls(self) -> Dict[str, Any]:
+        """Render PCA steering-specific controls in Streamlit."""
+        import streamlit as st
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            component_idx = self._render_latent_selector()
+        
+        with col2:
+            steering_factor = st.slider(
+                "Steering Factor", 
+                min_value=-1000.0,
+                max_value=1000.0,
+                value=1.0,
+                step=0.1,
+                help="Strength and direction of steering (negative values reverse the effect)"
+            )
+        
+        steering_mode = st.selectbox(
+            "Steering Mode",
+            options=["prompt_only", "all_tokens"],
+            index=1,  # Default to all_tokens
+            help="Apply steering only to prompt tokens or to all tokens (prompt + generated)"
+        )
+        
+        return {
+            "latent_idx": component_idx,
+            "steering_factor": steering_factor,
+            "steering_mode": steering_mode
+        }
+    
+    def _get_title(self) -> str:
+        """Get title for PCA steering analysis."""
+        config_tag = self.pca_info['config_tag']
+        config_display_names = {
+            'all_datasets': 'All Datasets',
+            'chat_only': 'Chat Only',
+            'pretrain_only': 'Pretrain Only', 
+            'train_only': 'Train Only',
+            'chat_pretrain': 'Chat + Pretrain',
+            'chat_train': 'Chat + Train',
+            'pretrain_train': 'Pretrain + Train',
+        }
+        config_display = config_display_names.get(config_tag, config_tag.replace('_', ' ').title())
+        return f"PCA Component Steering - Layer {self.layer} - {config_display}"

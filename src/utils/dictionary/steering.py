@@ -7,9 +7,11 @@ from collections import defaultdict
 from loguru import logger
 from pathlib import Path
 from tqdm import tqdm
+import re
+import streamlit as st
+from pathlib import Path
 
 from tiny_dashboard.utils import apply_chat
-import re
 
 from src.utils.dictionary.utils import load_latent_df, load_dictionary_model
 
@@ -93,20 +95,50 @@ def run_latent_steering_experiment(
     
     prompts = load_prompts(prompts_file)
 
-
     dictionary_model = load_dictionary_model(dictionary_name)
+
+    # Latent selection logic moved from latent_steering_experiment
+    assert target_column in latent_df.columns, f"target_column '{target_column}' not found in latent_df"
+    
+    # Apply absolute values if configured (default is True)
+    if not hasattr(latent_steering_cfg, 'absolute') or latent_steering_cfg.absolute:
+        latent_df[target_column] = latent_df[target_column].abs()
+    
+    # Drop rows with NaN values
+    latent_df = latent_df.dropna(subset=[target_column])
+    
+    # Select top-k latents
+    if largest:
+        top_latents = latent_df.nlargest(k, target_column)
+    else:
+        top_latents = latent_df.nsmallest(k, target_column)
+    assert len(top_latents) == k, f"Only {len(top_latents)} latents available, requested {k}"
+    
+    # Prepare latent metadata for the experiment
+    selected_latents = []
+    for idx, row in top_latents.iterrows():
+        # Try validation first, then train, then fail
+        if 'max_act_validation' in row:
+            max_act = row['max_act_validation']
+        elif 'max_act_train' in row:
+            max_act = row['max_act_train']
+        else:
+            raise KeyError(f"Neither 'max_act_validation' nor 'max_act_train' found for latent {idx}")
+        
+        latent_metadata = {
+            'latent_idx': idx,
+            'max_act': max_act,
+        }
+        selected_latents.append(latent_metadata)
 
     results = latent_steering_experiment(
         get_latent_fn=lambda latent_idx: get_latent_fn(latent_idx, dictionary_model=dictionary_model),
         prompts=prompts,
-        latent_df=latent_df,
-        target_column=target_column,
-        k=k,
+        selected_latents=selected_latents,
         base_model=method.base_model,
         finetuned_model=method.finetuned_model,
         tokenizer=method.tokenizer,
         layer=layer,
-        largest=largest,
         batch_size=48,
         max_length=latent_steering_cfg.max_length,
         temperature=latent_steering_cfg.temperature,
@@ -125,15 +157,11 @@ def run_latent_steering_experiment(
 def latent_steering_experiment(
     get_latent_fn,             # Function: latent_idx -> latent_vector  
     prompts: List[str],        # List of prompts to test
-    latent_df: pd.DataFrame,   # DataFrame with latent statistics
-    target_column: str,        # Column to sort by for top-k selection
-    k: int,                    # Number of top latents to test
+    selected_latents: List[Dict], # List of dictionaries containing latent metadata
     base_model,                # Base language model
-    finetuned_model,           # Finetuned language model
+    finetuned_model,           # Finetuned language model  
     tokenizer,                 # Tokenizer
     layer: int,                # Layer to apply steering to
-    largest: bool = False,      # Whether to use largest latents
-    absolute: bool = True,     # Whether to use absolute values of latents
     batch_size: int = 8,       # Batch size for parallel generation
     max_length: int = 50,      # Max tokens to generate
     temperature: float = 1.0,  # Generation temperature
@@ -154,14 +182,11 @@ def latent_steering_experiment(
     Args:
         get_latent_fn: Function that takes latent_idx and returns latent vector
         prompts: List of prompts to test
-        latent_df: DataFrame with latent statistics including target_column
-        target_column: Column name to sort latents by for top-k selection
-        k: Number of top latents to test
+        selected_latents: List of dictionaries containing latent metadata
         base_model: Base language model
         finetuned_model: Finetuned language model  
         tokenizer: Tokenizer for both models
         layer: Layer index to apply steering to
-        largest: Whether to use largest latents (default: False for smallest)
         batch_size: Number of steering configs to process in parallel per batch
         max_length: Maximum tokens to generate
         temperature: Sampling temperature
@@ -179,10 +204,14 @@ def latent_steering_experiment(
     
     # Validate inputs
     assert len(prompts) > 0, "Must provide at least one prompt"
-    assert k > 0, "k must be positive"
+    assert len(selected_latents) > 0, "Must provide at least one selected latent"
     assert batch_size > 0, "batch_size must be positive"  
-    assert target_column in latent_df.columns, f"target_column '{target_column}' not found in latent_df"
     assert layer >= 0, "layer must be non-negative"
+    
+    # Validate selected_latents format
+    for latent in selected_latents:
+        assert 'latent_idx' in latent, "Each selected latent must have 'latent_idx'"
+        assert 'max_act' in latent, "Each selected latent must have 'max_act'"
     
     # Model selection
     models = {
@@ -190,44 +219,24 @@ def latent_steering_experiment(
         'finetuned': finetuned_model
     }
     
-    # Top-K latent selection
-    if absolute:
-        latent_df[target_column] = latent_df[target_column].abs()
-    
-    # Drop rows with NaN values
-    latent_df = latent_df.dropna(subset=[target_column])
-    
-    if largest:
-        top_latents = latent_df.nlargest(k, target_column)
-    else:
-        top_latents = latent_df.nsmallest(k, target_column)
-    assert len(top_latents) == k, f"Only {len(top_latents)} latents available, requested {k}"
-    
-    
-    # Create all steering configurations
+    # Create all steering configurations from selected latents
     all_steering_configs = []
-    for idx, row in top_latents.iterrows():
-        # Try validation first, then train, then fail
-        if 'max_act_validation' in row:
-            max_act = row['max_act_validation']
-        elif 'max_act_train' in row:
-            max_act = row['max_act_train']
-        else:
-            raise KeyError(f"Neither 'max_act_validation' nor 'max_act_train' found for latent {idx}")
-            
+    for latent_metadata in selected_latents:
+        latent_idx = latent_metadata['latent_idx']
+        max_act = latent_metadata['max_act']
+        
         for percentage in steering_factors_percentages:
             for mode in steering_modes:
                 config = {
-                    'latent_idx': idx,
+                    'latent_idx': latent_idx,
                     'steering_factor': percentage * max_act,
                     'steering_factor_percentage': percentage,
                     'steering_mode': mode,
                     'max_act': max_act,
-                    'target_value': row[target_column]
                 }
                 all_steering_configs.append(config)
     
-    logger.info(f"Created {len(all_steering_configs)} steering configurations for {k} top latents")
+    logger.info(f"Created {len(all_steering_configs)} steering configurations for {len(selected_latents)} selected latents")
     
     results = []
     
@@ -263,7 +272,6 @@ def latent_steering_experiment(
                         'steering_factor_percentage': config['steering_factor_percentage'],
                         'steering_mode': config['steering_mode'],
                         'max_act': config['max_act'],
-                        'target_value': config['target_value'],
                         'is_baseline': config.get('is_baseline', False),
                         'prompt': prompt,
                         'formatted_prompt': batch_data['formatted_prompt'],
@@ -295,7 +303,6 @@ def _create_batches_for_prompt_by_mode(prompt: str, steering_configs: List[Dict]
         'steering_factor_percentage': 0.0,
         'steering_mode': 'baseline',
         'max_act': 0.0,
-        'target_value': 0.0,
         'is_baseline': True
     }
     
@@ -453,17 +460,15 @@ def save_results_to_csv(results: List[Dict], filepath: str) -> None:
     logger.info(f"Saved {len(results)} results to {filepath}")
 
 
-def display_steering_results(results_dir: Path, dictionary_name: str, cfg=None) -> None:
+def display_steering_results(results_dir: Path, cfg=None) -> None:
     """
     Display steering experiment results in Streamlit interface.
     
     Args:
         results_dir: Directory containing steering results CSV files
-        dictionary_name: Name of the dictionary/SAE model
         cfg: Configuration object containing model settings (optional)
     """
-    import streamlit as st
-    from pathlib import Path
+
     
     st.markdown("### Latent Steering Experiment Results")
     
@@ -516,10 +521,6 @@ def display_steering_results(results_dir: Path, dictionary_name: str, cfg=None) 
         options=unique_latents,
         help="Choose which latent's steering effects to display"
     )
-    
-    # Show target value for selected latent
-    latent_target_value = df[df['latent_idx'] == selected_latent]['target_value'].iloc[0]
-    st.caption(f"Target Value (Index): {int(latent_target_value)}")
     
     # Filter results for selected latent (including baseline)
     latent_results = df[(df['latent_idx'] == selected_latent) | (df['is_baseline'] == True)]
@@ -593,7 +594,7 @@ def display_steering_results(results_dir: Path, dictionary_name: str, cfg=None) 
     with col_export1:
         # Current latent export
         all_results_text = _format_all_results_for_llm_analysis(
-            selected_latent, int(latent_target_value), grouped_results, 
+            selected_latent, grouped_results, 
             selected_modes, selected_factors, selected_model, cfg
         )
         
@@ -720,7 +721,6 @@ def _format_results_for_llm_analysis(latent_idx: int, group_data: Dict, model_ty
     if steered_results:
         first_steered = steered_results[0]
         output.append(f"Max Activation: {first_steered['max_act']:.4f}")
-        output.append(f"Target Value: {first_steered['target_value']:.4f}")
         output.append(f"Layer: {first_steered['layer']}")
     
     output.append("")
@@ -792,7 +792,6 @@ def _download_all_latents_analysis(df: pd.DataFrame, unique_latents: List[int], 
         for latent_idx in unique_latents:
             # Filter results for this latent
             latent_results = df[(df['latent_idx'] == latent_idx) | (df['is_baseline'] == True)]
-            target_value_idx = int(df[df['latent_idx'] == latent_idx]['target_value'].iloc[0])
             
             # Apply model and other filters
             if selected_modes and selected_factors:
@@ -813,7 +812,7 @@ def _download_all_latents_analysis(df: pd.DataFrame, unique_latents: List[int], 
                 
                 # Format results for this latent
                 formatted_text = _format_all_results_for_llm_analysis(
-                    latent_idx, target_value_idx, grouped_results, 
+                    latent_idx, grouped_results, 
                     selected_modes, selected_factors, selected_model, cfg
                 )
                 
@@ -833,13 +832,12 @@ def _download_all_latents_analysis(df: pd.DataFrame, unique_latents: List[int], 
     )
 
 
-def _format_all_results_for_llm_analysis(latent_idx: int, target_value_idx: int, all_grouped_results: Dict, selected_modes: List[str], selected_factors: List[float], selected_model: str, cfg=None) -> str:
+def _format_all_results_for_llm_analysis(latent_idx: int, all_grouped_results: Dict, selected_modes: List[str], selected_factors: List[float], selected_model: str, cfg=None) -> str:
     """
     Format all steering results into one comprehensive text for LLM analysis.
     
     Args:
         latent_idx: The latent index being analyzed
-        target_value_idx: Target value as integer index
         all_grouped_results: All grouped results across prompts and models
         selected_modes: Selected steering modes
         selected_factors: Selected steering factor percentages
@@ -856,7 +854,6 @@ def _format_all_results_for_llm_analysis(latent_idx: int, target_value_idx: int,
     
     # Overall metadata
     output.append(f"Latent Index: {latent_idx}")
-    output.append(f"Target Value (Index): {target_value_idx}")
     output.append(f"Model: {selected_model.title()}")
     output.append(f"Analyzed Steering Modes: {', '.join(selected_modes)}")
     output.append(f"Analyzed Steering Strengths: {', '.join([f'{f}×' for f in selected_factors])}")

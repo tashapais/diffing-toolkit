@@ -725,7 +725,7 @@ class SAEDifferenceMethod(DiffingMethod):
         st.markdown(f"**Selected SAE:** Layer {layer} - {dictionary_name}")
         
         # Display the steering results using the imported function
-        display_steering_results(model_results_dir, dictionary_name, self.cfg)
+        display_steering_results(model_results_dir, self.cfg)
 
     @torch.no_grad()
     def compute_sae_activations_for_tokens(
