@@ -187,9 +187,8 @@ def compute_scalers_from_config(
 
     # Check if betas exist
     if not ls_cfg.overwrite:
-        ft_error = (
-            ft_error
-            and (not betas_exist(
+        ft_error = ft_error and (
+            not betas_exist(
                 results_dir / "closed_form_scalars" / "effective_ft_only_latents",
                 num_samples,
                 "ft_error",
@@ -198,11 +197,10 @@ def compute_scalers_from_config(
                 results_dir / "closed_form_scalars" / "shared_baseline_latents",
                 num_samples,
                 "ft_error",
-            ))
+            )
         )
-        base_error = (
-            base_error
-            and (not betas_exist(
+        base_error = base_error and (
+            not betas_exist(
                 results_dir / "closed_form_scalars" / "effective_ft_only_latents",
                 num_samples,
                 "base_error",
@@ -211,25 +209,37 @@ def compute_scalers_from_config(
                 results_dir / "closed_form_scalars" / "shared_baseline_latents",
                 num_samples,
                 "base_error",
-            ))
+            )
         )
         ft_reconstruction = ft_reconstruction and not betas_exist(
-            results_dir / "closed_form_scalars" / "all_latents", num_samples, "ft_reconstruction"
+            results_dir / "closed_form_scalars" / "all_latents",
+            num_samples,
+            "ft_reconstruction",
         )
         base_reconstruction = base_reconstruction and not betas_exist(
-            results_dir / "closed_form_scalars" / "all_latents", num_samples, "base_reconstruction"
+            results_dir / "closed_form_scalars" / "all_latents",
+            num_samples,
+            "base_reconstruction",
         )
         ft_activation = ft_activation and not betas_exist(
-            results_dir / "closed_form_scalars" / "all_latents", num_samples, "ft_activation"
+            results_dir / "closed_form_scalars" / "all_latents",
+            num_samples,
+            "ft_activation",
         )
         base_activation = base_activation and not betas_exist(
-            results_dir / "closed_form_scalars" / "all_latents", num_samples, "base_activation"
+            results_dir / "closed_form_scalars" / "all_latents",
+            num_samples,
+            "base_activation",
         )
         ft_activation_no_bias = ft_activation_no_bias and not betas_exist(
-            results_dir / "closed_form_scalars" / "all_latents", num_samples, "ft_activation_no_bias"
+            results_dir / "closed_form_scalars" / "all_latents",
+            num_samples,
+            "ft_activation_no_bias",
         )
         base_activation_no_bias = base_activation_no_bias and not betas_exist(
-            results_dir / "closed_form_scalars" / "all_latents", num_samples, "base_activation_no_bias"
+            results_dir / "closed_form_scalars" / "all_latents",
+            num_samples,
+            "base_activation_no_bias",
         )
 
     # Log which scalers will be computed
@@ -250,7 +260,7 @@ def compute_scalers_from_config(
         scalers_to_compute.append("ft_activation_no_bias")
     if base_activation_no_bias:
         scalers_to_compute.append("base_activation_no_bias")
-    
+
     logger.info(f"Scalers to compute: {scalers_to_compute}")
 
     if len(scalers_to_compute) == 0:
@@ -263,8 +273,13 @@ def compute_scalers_from_config(
     # Setup paths
     # Load validation dataset
     train_dataset, val_dataset, _, _, _ = setup_training_datasets(
-        cfg, layer, overwrite_num_samples=num_samples, overwrite_local_shuffling=False,
-        dataset_processing_function=lambda x: skip_first_n_tokens(x, cfg.model.ignore_first_n_tokens_per_sample_during_training)
+        cfg,
+        layer,
+        overwrite_num_samples=num_samples,
+        overwrite_local_shuffling=False,
+        dataset_processing_function=lambda x: skip_first_n_tokens(
+            x, cfg.model.ignore_first_n_tokens_per_sample_during_training
+        ),
     )
     if ls_cfg.dataset_split == "train":
         dataset = train_dataset
@@ -352,7 +367,9 @@ def compute_scalers_from_config(
             is_difference_sae=is_difference_sae,
             smaller_batch_size_for_error=True,
         )
-        effective_dir = results_dir / "closed_form_scalars" / "effective_ft_only_latents"
+        effective_dir = (
+            results_dir / "closed_form_scalars" / "effective_ft_only_latents"
+        )
         effective_dir.mkdir(parents=True, exist_ok=True)
         th.save(
             effective_ft_only_latents_indices,
@@ -558,7 +575,9 @@ def compute_scalers(
     results_dir.mkdir(parents=True, exist_ok=True)
 
     logger.info("Saving results to ", results_dir)
-    encode_activation_fn = partial(identity_fn, normalize=False) # The dict_model normalizes automatically in .encode()
+    encode_activation_fn = partial(
+        identity_fn, normalize=False
+    )  # The dict_model normalizes automatically in .encode()
     if isinstance(dict_model, BatchTopKSAE):
         # Deal with BatchTopKSAE
         if is_difference_sae:
@@ -576,24 +595,45 @@ def compute_scalers(
 
     computations = []
     if base_activation:
-        computations.append(("base_activation", partial(load_base_activation, normalize=True)))
+        computations.append(
+            ("base_activation", partial(load_base_activation, normalize=True))
+        )
     if ft_activation:
-        computations.append(("ft_activation", partial(load_ft_activation, normalize=True)))
+        computations.append(
+            ("ft_activation", partial(load_ft_activation, normalize=True))
+        )
     if base_reconstruction:
-        computations.append(("base_reconstruction", partial(load_base_reconstruction, normalize=True)))
+        computations.append(
+            ("base_reconstruction", partial(load_base_reconstruction, normalize=True))
+        )
     if base_error:
         assert isinstance(
             dict_model, CrossCoder
         ), "Base error only supported for CrossCoder"
         computations.append(
-            ("base_error", partial(load_base_error, base_decoder=base_decoder, normalize=True))
+            (
+                "base_error",
+                partial(load_base_error, base_decoder=base_decoder, normalize=True),
+            )
         )
     if base_activation_no_bias:
-        computations.append(("base_activation_no_bias", partial(load_base_activation_no_bias, normalize=True)))
+        computations.append(
+            (
+                "base_activation_no_bias",
+                partial(load_base_activation_no_bias, normalize=True),
+            )
+        )
     if ft_activation_no_bias:
-        computations.append(("ft_activation_no_bias", partial(load_ft_activation_no_bias, normalize=True)))
+        computations.append(
+            (
+                "ft_activation_no_bias",
+                partial(load_ft_activation_no_bias, normalize=True),
+            )
+        )
     if ft_reconstruction:
-        computations.append(("ft_reconstruction", partial(load_ft_reconstruction, normalize=True)))
+        computations.append(
+            ("ft_reconstruction", partial(load_ft_reconstruction, normalize=True))
+        )
     if ft_error:
         computations.append(("ft_error", partial(load_ft_error, normalize=True)))
 

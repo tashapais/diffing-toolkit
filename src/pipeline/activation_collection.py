@@ -23,7 +23,7 @@ import jinja2
 
 from ..utils import load_model_from_config
 from ..utils.configs import get_safe_model_id
-    
+
 
 def format_chat_data(
     dataset: Dataset, tokenizer: AutoTokenizer, messages_column: str = "messages"
@@ -48,7 +48,7 @@ def format_chat_data(
 
     formatted_texts = []
     skipped_count = 0
-    
+
     for sample in dataset:
         messages = sample[messages_column]
         try:
@@ -58,7 +58,10 @@ def format_chat_data(
             )
             formatted_texts.append(formatted_text)
         except jinja2.exceptions.TemplateError as e:
-            if "Conversation roles must alternate user/assistant/user/assistant/" in str(e):
+            if (
+                "Conversation roles must alternate user/assistant/user/assistant/"
+                in str(e)
+            ):
                 # Skip messages with non-alternating roles
                 skipped_count += 1
                 logger.debug(f"Skipping sample due to non-alternating roles: {e}")
@@ -74,8 +77,10 @@ def format_chat_data(
             raise e
 
     if skipped_count > 0:
-        logger.info(f"Skipped {skipped_count} samples due to non-alternating conversation roles")
-    
+        logger.info(
+            f"Skipped {skipped_count} samples due to non-alternating conversation roles"
+        )
+
     return formatted_texts
 
 
@@ -97,7 +102,9 @@ def tokenize_texts(
 
     tokenized_texts = []
     for text in texts:
-        requires_special_tokens = tokenizer.bos_token is not None and tokenizer.bos_token not in text
+        requires_special_tokens = (
+            tokenizer.bos_token is not None and tokenizer.bos_token not in text
+        )
         # Tokenize with truncation
         tokens = tokenizer.encode(
             text,
@@ -123,7 +130,7 @@ def collect_activations(
     max_tokens: int = 10**8,
     batch_size: int = 64,
     context_len: int = 1024,
-    dtype:torch.dtype =torch.bfloat16,
+    dtype: torch.dtype = torch.bfloat16,
     store_tokens: bool = False,
     overwrite: bool = False,
     disable_multiprocessing: bool = False,
@@ -172,7 +179,11 @@ def collect_activations(
     store_dir = Path(activation_store_dir)
     store_dir.mkdir(parents=True, exist_ok=True)
     model_name_clean = get_safe_model_id(model_cfg)
-    data_split_name = dataset_split + (f"_col_{text_column}" if text_column is not None and text_column != default_text_column else "")
+    data_split_name = dataset_split + (
+        f"_col_{text_column}"
+        if text_column is not None and text_column != default_text_column
+        else ""
+    )
     out_dir = store_dir / model_name_clean / dataset_name / data_split_name
 
     if not overwrite:
@@ -204,12 +215,16 @@ def collect_activations(
     # Set up submodules
     submodules = [nnmodel.model.layers[layer] for layer in layers]
     submodule_names = [f"layer_{layer}" for layer in layers]
-    
-    exists, num_toks = ActivationCache.exists(out_dir, submodule_names, "out", store_tokens)
+
+    exists, num_toks = ActivationCache.exists(
+        out_dir, submodule_names, "out", store_tokens
+    )
     if not overwrite and exists:
-        logger.info(f"Activations already exist (n_toks={num_toks}) for {model_cfg.model_id} + {dataset_name} ({data_split_name}) - skipping")
+        logger.info(
+            f"Activations already exist (n_toks={num_toks}) for {model_cfg.model_id} + {dataset_name} ({data_split_name}) - skipping"
+        )
         return
-    
+
     d_model = nnmodel._model.config.hidden_size
     logger.info(f"d_model: {d_model}")
 
@@ -223,12 +238,16 @@ def collect_activations(
         logger.info(f"Using pre-formatted text from column: {text_column}")
         texts = dataset[text_column]
         texts = tokenize_texts(texts, tokenizer, context_len)
-        need_special_tokens = tokenizer.bos_token is not None and tokenizer.bos_token not in texts[0]
+        need_special_tokens = (
+            tokenizer.bos_token is not None and tokenizer.bos_token not in texts[0]
+        )
     elif is_chat_data:
         # Format chat data and tokenize
         logger.info("Processing chat data: formatting and tokenizing")
         texts = format_chat_data(dataset, tokenizer, messages_column)
-        need_special_tokens = tokenizer.bos_token is not None and tokenizer.bos_token not in texts[0]
+        need_special_tokens = (
+            tokenizer.bos_token is not None and tokenizer.bos_token not in texts[0]
+        )
     else:
         # Use default text column and tokenize
         if default_text_column not in dataset.column_names:
@@ -243,7 +262,6 @@ def collect_activations(
     logger.info(f"Processing {len(texts)} samples")
     logger.info(f"Need special tokens: {need_special_tokens}")
 
-    
     # Collect activations
     ActivationCache.collect(
         texts,

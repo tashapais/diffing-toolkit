@@ -22,6 +22,7 @@ import numpy as np
 from src.utils.dictionary import load_dictionary_model
 from src.utils.dictionary.utils import push_latent_df, load_latent_df
 
+
 def build_push_crosscoder_latent_df(
     dictionary_name: str,
     base_layer: int = 0,
@@ -30,7 +31,9 @@ def build_push_crosscoder_latent_df(
     crosscoder = load_dictionary_model(dictionary_name)
     try:
         existing_latent_df = load_latent_df(dictionary_name)
-        logger.info(f"Found existing latent dataframe for {dictionary_name} with {len(existing_latent_df)} latents")
+        logger.info(
+            f"Found existing latent dataframe for {dictionary_name} with {len(existing_latent_df)} latents"
+        )
         latent_df = existing_latent_df.T.to_dict()
     except Exception:
         latent_df = {k: {} for k in range(crosscoder.dict_size)}
@@ -62,17 +65,17 @@ def build_push_crosscoder_latent_df(
         latent_df[f_idx]["enc_norm_diff"] = norm_diff.item()
 
     decoder_cos_sims = cosine_similarity(
-        crosscoder.decoder.weight[base_layer], # [num_features, activation_dim]
-        crosscoder.decoder.weight[ft_layer], # [num_features, activation_dim]
+        crosscoder.decoder.weight[base_layer],  # [num_features, activation_dim]
+        crosscoder.decoder.weight[ft_layer],  # [num_features, activation_dim]
         dim=1,
-    ) 
+    )
     for f_idx, cos_sim in enumerate(decoder_cos_sims):
         latent_df[f_idx]["dec_cos_sim"] = cos_sim.item()
 
     # Encoder cos sims
     enc_cos_sims = cosine_similarity(
-        crosscoder.encoder.weight[base_layer], # [activation_dim, num_features]
-        crosscoder.encoder.weight[ft_layer], # [activation_dim, num_features]
+        crosscoder.encoder.weight[base_layer],  # [activation_dim, num_features]
+        crosscoder.encoder.weight[ft_layer],  # [activation_dim, num_features]
         dim=0,
     )
     for f_idx, cos_sim in enumerate(enc_cos_sims):
@@ -103,7 +106,9 @@ def build_push_crosscoder_latent_df(
 
     latent_df = pd.DataFrame(latent_df).T
     logger.info(f"Created latent dataframe with {len(latent_df)} latents")
-    push_latent_df(latent_df, dictionary_name, confirm=False, create_repo_if_missing=True)
+    push_latent_df(
+        latent_df, dictionary_name, confirm=False, create_repo_if_missing=True
+    )
     return latent_df
 
 
@@ -113,30 +118,34 @@ def build_push_sae_difference_latent_df(
 ) -> pd.DataFrame:
     """
     Build latent dataframe for SAE difference models.
-    
+
     Args:
         dictionary_name: Name of the SAE model
         target: Training target ("difference_bft" or "difference_ftb")
-        
+
     Returns:
         DataFrame containing latent statistics for SAE difference model
     """
-    logger.info(f"Building latent dataframe for SAE difference model: {dictionary_name}")
- 
+    logger.info(
+        f"Building latent dataframe for SAE difference model: {dictionary_name}"
+    )
+
     sae = load_dictionary_model(dictionary_name)
     try:
         existing_latent_df = load_latent_df(dictionary_name)
-        logger.info(f"Found existing latent dataframe for {dictionary_name} with {len(existing_latent_df)} latents")
+        logger.info(
+            f"Found existing latent dataframe for {dictionary_name} with {len(existing_latent_df)} latents"
+        )
         latent_df = existing_latent_df.T.to_dict()
     except Exception:
         latent_df = {k: {} for k in range(sae.dict_size)}
 
     # Decoder norms
-    decoder_norms = sae.decoder.weight.norm(dim=0) # [num_features]
+    decoder_norms = sae.decoder.weight.norm(dim=0)  # [num_features]
     assert decoder_norms.shape == (sae.dict_size,)
 
-    # Encoder norms  
-    encoder_norms = sae.encoder.weight.norm(dim=1) # [num_features]
+    # Encoder norms
+    encoder_norms = sae.encoder.weight.norm(dim=1)  # [num_features]
     assert encoder_norms.shape == (sae.dict_size,)
 
     for f_idx, norm in enumerate(decoder_norms):
@@ -146,9 +155,11 @@ def build_push_sae_difference_latent_df(
 
     # Convert to DataFrame
     latent_df = pd.DataFrame(latent_df).T
-    
+
     logger.info(f"Created latent dataframe with {len(latent_df)} latents")
-    push_latent_df(latent_df, dictionary_name, confirm=False, create_repo_if_missing=True)
+    push_latent_df(
+        latent_df, dictionary_name, confirm=False, create_repo_if_missing=True
+    )
     return latent_df
 
 
@@ -158,46 +169,107 @@ def make_plots(
 ):
     df = load_latent_df(dictionary_name)
     plots_dir.mkdir(parents=True, exist_ok=True)
-    if "effective_ft_only_latent" in df.columns and "shared_baseline_latent" in df.columns:
+    if (
+        "effective_ft_only_latent" in df.columns
+        and "shared_baseline_latent" in df.columns
+    ):
         target_df = df[df["effective_ft_only_latent"]]
         baseline_df = df[df["shared_baseline_latent"]]
-        plot_error_vs_reconstruction(target_df, baseline_df, plots_dir, variant="standard")
+        plot_error_vs_reconstruction(
+            target_df, baseline_df, plots_dir, variant="standard"
+        )
         plot_error_vs_reconstruction(
             target_df, baseline_df, plots_dir, variant="custom_color"
         )
-        plot_error_vs_reconstruction(target_df, baseline_df, plots_dir, variant="poster")
+        plot_error_vs_reconstruction(
+            target_df, baseline_df, plots_dir, variant="poster"
+        )
 
         plot_ratio_histogram(target_df, baseline_df, plots_dir, ratio_type="error")
-        plot_ratio_histogram(target_df, baseline_df, plots_dir, ratio_type="reconstruction")
+        plot_ratio_histogram(
+            target_df, baseline_df, plots_dir, ratio_type="reconstruction"
+        )
 
         plot_beta_distribution_histograms(target_df, plots_dir)
         plot_correlation_with_frequency(df, plots_dir)
         plot_rank_distributions(target_df, plots_dir)
-    
-    if "enc_norm" in df.columns:
-        plot_histogram(df, "enc_norm", plots_dir, title="Encoder Norm", xlabel="Norm", log_scale=True)
-    
-    if "dec_norm" in df.columns:
-        plot_histogram(df, "dec_norm", plots_dir, title="Decoder Norm", xlabel="Norm", log_scale=True)
-    
-    if "max_act_validation" in df.columns:
-        plot_histogram(df, "max_act_validation", plots_dir, title="Max Activation Validation", xlabel="Max Activation Validation", log_scale=True)
-    
-    if "max_act_train" in df.columns:
-        plot_histogram(df, "max_act_train", plots_dir, title="Max Activation Train", xlabel="Max Activation Train", log_scale=True)
-    
-    if "beta_ratio_activation" in df.columns:
-        plot_histogram(df, "beta_ratio_activation", plots_dir, title="Beta Ratio Activation", xlabel="Beta Ratio Activation", log_scale=True)
-    
-    if "beta_ratio_activation_no_bias" in df.columns:
-        plot_histogram(df, "beta_ratio_activation_no_bias", plots_dir, title="Beta Ratio Activation No Bias", xlabel="Beta Ratio Activation No Bias", log_scale=True)
-    
-    if "freq_validation" in df.columns:
-        plot_histogram(df, "freq_validation", plots_dir, title="Frequency Validation", xlabel="Frequency Validation", log_scale=True)
 
-def plot_histogram(df, column, plots_dir, title=None, xlabel=None, filename=None, log_scale=False):
+    if "enc_norm" in df.columns:
+        plot_histogram(
+            df,
+            "enc_norm",
+            plots_dir,
+            title="Encoder Norm",
+            xlabel="Norm",
+            log_scale=True,
+        )
+
+    if "dec_norm" in df.columns:
+        plot_histogram(
+            df,
+            "dec_norm",
+            plots_dir,
+            title="Decoder Norm",
+            xlabel="Norm",
+            log_scale=True,
+        )
+
+    if "max_act_validation" in df.columns:
+        plot_histogram(
+            df,
+            "max_act_validation",
+            plots_dir,
+            title="Max Activation Validation",
+            xlabel="Max Activation Validation",
+            log_scale=True,
+        )
+
+    if "max_act_train" in df.columns:
+        plot_histogram(
+            df,
+            "max_act_train",
+            plots_dir,
+            title="Max Activation Train",
+            xlabel="Max Activation Train",
+            log_scale=True,
+        )
+
+    if "beta_ratio_activation" in df.columns:
+        plot_histogram(
+            df,
+            "beta_ratio_activation",
+            plots_dir,
+            title="Beta Ratio Activation",
+            xlabel="Beta Ratio Activation",
+            log_scale=True,
+        )
+
+    if "beta_ratio_activation_no_bias" in df.columns:
+        plot_histogram(
+            df,
+            "beta_ratio_activation_no_bias",
+            plots_dir,
+            title="Beta Ratio Activation No Bias",
+            xlabel="Beta Ratio Activation No Bias",
+            log_scale=True,
+        )
+
+    if "freq_validation" in df.columns:
+        plot_histogram(
+            df,
+            "freq_validation",
+            plots_dir,
+            title="Frequency Validation",
+            xlabel="Frequency Validation",
+            log_scale=True,
+        )
+
+
+def plot_histogram(
+    df, column, plots_dir, title=None, xlabel=None, filename=None, log_scale=False
+):
     """Plot histogram of a column from dataframe
-    
+
     Args:
         df: DataFrame containing the data
         column: Column name to plot
@@ -209,11 +281,11 @@ def plot_histogram(df, column, plots_dir, title=None, xlabel=None, filename=None
     if column not in df.columns:
         logger.warning(f"Column '{column}' not found in dataframe")
         return
-    
+
     plt.figure(figsize=(6, 4))
     plt.rcParams["text.usetex"] = True
     plt.rcParams.update({"font.size": 24})
-    
+
     plt.hist(df[column], bins=100, alpha=0.7, color="blue")
     plt.xlabel(xlabel or column.replace("_", " ").title())
     plt.ylabel("Count")
@@ -224,6 +296,7 @@ def plot_histogram(df, column, plots_dir, title=None, xlabel=None, filename=None
     output_filename = filename or f"{column}.pdf"
     plt.savefig(plots_dir / output_filename, bbox_inches="tight")
     plt.close()
+
 
 def plot_beta_ratios_template_perc(target_df, filtered_df, plots_dir):
     """Plot histograms of beta ratios for template percentage
@@ -474,6 +547,7 @@ def plot_error_vs_reconstruction(target_df, baseline_df, plots_dir, variant="sta
     )
     plt.close()
 
+
 def plot_ratio_histogram(target_df, baseline_df, plots_dir, ratio_type="error"):
     """Plot histogram of beta ratio values for error or reconstruction"""
     if f"beta_ratio_{ratio_type}" not in target_df.columns:
@@ -493,7 +567,7 @@ def plot_ratio_histogram(target_df, baseline_df, plots_dir, ratio_type="error"):
         baseline_neg_mask = baseline_df[neg_filter_col] >= 0
         ratio_values_shared = baseline_df[ratio_col][baseline_neg_mask]
         ratio_shared_filtered = ratio_values_shared[~np.isnan(ratio_values_shared)]
-        
+
         # Compute combined range for consistent bins
         all_data = np.concatenate([ratio_filtered, ratio_shared_filtered])
     else:
@@ -506,7 +580,7 @@ def plot_ratio_histogram(target_df, baseline_df, plots_dir, ratio_type="error"):
     plt.figure(figsize=(5, 3))
     plt.rcParams["text.usetex"] = True
     plt.hist(ratio_filtered, bins=bins, alpha=0.5, label="ft-only")
-    
+
     if baseline_df is not None:
         plt.hist(ratio_shared_filtered, bins=bins, alpha=0.5, label="Shared")
 
@@ -727,5 +801,3 @@ def plot_rank_distributions(target_df, plots_dir):
                 bbox_inches="tight",
             )
             plt.close()
-
-

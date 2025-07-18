@@ -448,7 +448,6 @@ class AbstractOnlineDiffingDashboard(ABC):
 
                 # Store results in session state
                 st.session_state[session_keys['analysis_results']] = {
-                    "statistics": results["statistics"],
                     "total_tokens": results["total_tokens"],
                     "html_viz": html_viz,
                     "generated": enable_generation,
@@ -462,15 +461,7 @@ class AbstractOnlineDiffingDashboard(ABC):
 
             # Display statistics
             col1, col2, col3, col4 = st.columns(4)
-            stats = results_data["statistics"]
-            with col1:
-                st.metric("Mean", f"{stats['mean']:.4f}")
-            with col2:
-                st.metric("Max", f"{stats['max']:.4f}")
-            with col3:
-                st.metric("Total Tokens", results_data["total_tokens"])
-            with col4:
-                st.metric("Std", f"{stats['std']:.4f}")
+
 
             # Show context for generated text
             if results_data.get("generated", False):

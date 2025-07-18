@@ -123,12 +123,18 @@ def push_latent_df(
             # diff the columns
             if "float" in str(original_df[column].dtype):
                 equal = np.allclose(
-                    np.array(original_df[column].values, dtype=original_df[column].dtype), np.array(df[column].values, dtype=original_df[column].dtype), equal_nan=True
+                    np.array(
+                        original_df[column].values, dtype=original_df[column].dtype
+                    ),
+                    np.array(df[column].values, dtype=original_df[column].dtype),
+                    equal_nan=True,
                 )
             else:
                 equal = original_df[column].equals(df[column])
             if not equal:
-                logger.info(f"Column {column} has different values in original and new df:")
+                logger.info(
+                    f"Column {column} has different values in original and new df:"
+                )
                 if "float" in str(original_df[column].dtype):
                     diff_ratio = (
                         ~np.isclose(
@@ -254,19 +260,20 @@ def push_dictionary_model(model_path: Path, author=HF_NAME):
                 commit_message=f"Initial upload of {model_name} dictionary model",
             )
 
-            logger.info(f"Successfully created repository {repo_id} and uploaded model.")
+            logger.info(
+                f"Successfully created repository {repo_id} and uploaded model."
+            )
         except Exception as e2:
             logger.info(f"Failed to create repository and upload model: {e2}")
             raise e2
     return repo_id
 
+
 def push_config_to_hub(
-    cfg: DictConfig,
-    repo_id: str,
-    config_name: str = "training_config.yaml"
+    cfg: DictConfig, repo_id: str, config_name: str = "training_config.yaml"
 ) -> None:
     """Push a config file to HuggingFace Hub.
-    
+
     Args:
         cfg: Config to upload
         repo_id: Repository ID on HuggingFace Hub
@@ -275,15 +282,17 @@ def push_config_to_hub(
 
     # Convert DictConfig to dictionary and save to temporary file
     config_dict = OmegaConf.to_container(cfg, resolve=True)
-    
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.yaml', delete=False, dir='/tmp') as f:
+
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".yaml", delete=False, dir="/tmp"
+    ) as f:
         OmegaConf.save(config_dict, f)
-        temp_config_path = f.name   
-    
+        temp_config_path = f.name
+
     logger.info(f"Config dumped to temporary file: {temp_config_path}")
     config_path = Path(temp_config_path)
     assert config_path.exists(), f"Config file does not exist: {config_path}"
-    
+
     try:
         hf_api.upload_file(
             repo_id=repo_id,
@@ -296,6 +305,7 @@ def push_config_to_hub(
     except Exception as e:
         logger.info(f"Error uploading {config_name} to hub: {e}")
         raise e
+
 
 def load_dictionary_model(
     model_name: str | Path, is_sae: bool | None = None, author="science-of-finetuning"

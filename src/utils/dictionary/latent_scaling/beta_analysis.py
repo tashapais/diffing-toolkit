@@ -58,9 +58,7 @@ def update_latent_df_with_beta_values(
         df["effective_ft_only_latent"] = False
         df.loc[ft_specific_indices, "effective_ft_only_latent"] = True
     if Path(betas_dir / "shared_baseline_latents" / "indices.pt").exists():
-        shared_indices = th.load(
-            betas_dir / "shared_baseline_latents" / "indices.pt"
-        )
+        shared_indices = th.load(betas_dir / "shared_baseline_latents" / "indices.pt")
         if isinstance(shared_indices, th.Tensor):
             shared_indices = shared_indices.tolist()
         shared_error_betas = load_betas_results(
@@ -73,8 +71,6 @@ def update_latent_df_with_beta_values(
         df.loc[shared_indices, "shared_baseline_latent"] = True
     push_latent_df(df, crosscoder, confirm=False)
     return df
-
-
 
 
 def load_betas_results(
@@ -141,11 +137,9 @@ def add_possible_cols(df, indices, betas):
         df = add_col_to_df(
             df, indices, "beta_error_base", betas["normal"]["base"]["error"]
         )
-        df = add_col_to_df(
-            df, indices, "beta_error_ft", betas["normal"]["ft"]["error"]
-        )
+        df = add_col_to_df(df, indices, "beta_error_ft", betas["normal"]["ft"]["error"])
         df["beta_ratio_error"] = df["beta_error_base"] / df["beta_error_ft"]
-    
+
     if (
         betas["normal"]["base"]["reconstruction"] is not None
         and betas["normal"]["ft"]["reconstruction"] is not None
@@ -165,7 +159,6 @@ def add_possible_cols(df, indices, betas):
         df["beta_ratio_reconstruction"] = (
             df["beta_reconstruction_base"] / df["beta_reconstruction_ft"]
         )
-    
 
     if (
         betas["normal"]["base"]["activation"] is not None
@@ -180,7 +173,7 @@ def add_possible_cols(df, indices, betas):
         df["beta_activation_ratio"] = (
             df["beta_activation_base"] / df["beta_activation_ft"]
         )
- 
+
     if (
         betas["normal"]["base"]["activation_no_bias"] is not None
         and betas["normal"]["ft"]["activation_no_bias"] is not None
@@ -200,6 +193,5 @@ def add_possible_cols(df, indices, betas):
         df["beta_activation_no_bias_ratio"] = (
             df["beta_activation_no_bias_base"] / df["beta_activation_no_bias_ft"]
         )
-    
-    return df
 
+    return df

@@ -108,11 +108,19 @@ def create_html_highlight(
 
 
 def filter_examples_by_search(
-    examples: List[Union[Tuple[float, List[str], List[float], str], 
-                        Tuple[float, List[str], List[float], str, str]]], 
-    search_term: str
-) -> List[Union[Tuple[float, List[str], List[float], str], 
-                Tuple[float, List[str], List[float], str, str]]]:
+    examples: List[
+        Union[
+            Tuple[float, List[str], List[float], str],
+            Tuple[float, List[str], List[float], str, str],
+        ]
+    ],
+    search_term: str,
+) -> List[
+    Union[
+        Tuple[float, List[str], List[float], str],
+        Tuple[float, List[str], List[float], str, str],
+    ]
+]:
     """
     Filter examples by search term.
 
@@ -141,10 +149,10 @@ def filter_examples_by_search(
 def create_dataset_name_html(dataset_name: str) -> str:
     """
     Create HTML for dataset name display in top right corner.
-    
+
     Args:
         dataset_name: Name of the dataset
-        
+
     Returns:
         HTML string for dataset name display
     """
@@ -160,8 +168,12 @@ def create_dataset_name_html(dataset_name: str) -> str:
 
 @st.cache_data
 def create_examples_html(
-    examples: List[Union[Tuple[float, List[str], List[float], str], 
-                        Tuple[float, List[str], List[float], str, str]]],
+    examples: List[
+        Union[
+            Tuple[float, List[str], List[float], str],
+            Tuple[float, List[str], List[float], str, str],
+        ]
+    ],
     _tokenizer: AutoTokenizer,
     title: str = "Max Activating Examples",
     max_examples: int = 30,
@@ -198,7 +210,7 @@ def create_examples_html(
     for example in examples[:max_examples]:
         # Extract common elements
         max_act, tokens, token_acts, text = example[:4]
-        
+
         # Extract dataset_name if present
         dataset_name = example[4] if len(example) > 4 else None
         max_idx = int(torch.argmax(torch.tensor(token_acts)).item())
@@ -215,8 +227,12 @@ def create_examples_html(
         if dataset_name:
             dataset_html = create_dataset_name_html(dataset_name)
             # Wrap the content with relative positioning to allow absolute positioning of dataset name
-            collapsed_html = f'<div style="position: relative;">{dataset_html}{collapsed_html}</div>'
-            full_html = f'<div style="position: relative;">{dataset_html}{full_html}</div>'
+            collapsed_html = (
+                f'<div style="position: relative;">{dataset_html}{collapsed_html}</div>'
+            )
+            full_html = (
+                f'<div style="position: relative;">{dataset_html}{full_html}</div>'
+            )
 
         content_parts.append(create_example_html(max_act, collapsed_html, full_html))
 
@@ -262,13 +278,15 @@ def multi_tab_interface(tabs: List[Tuple[str, Callable]], title: str):
     st.subheader(title)
     for st_tab, (_, fn) in zip(st.tabs([t for t, _ in tabs]), tabs):
         with st_tab:
-            _tab_fragment(fn)    
+            _tab_fragment(fn)
+
 
 @st.fragment
 def _tab_fragment(render_fn):
-    with st.container():            
+    with st.container():
         render_fn()
-        
+
+
 def statistic_interactive_tab(
     statistics_function: Callable, interactive_function: Callable, title: str
 ):

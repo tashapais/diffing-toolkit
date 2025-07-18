@@ -11,32 +11,38 @@ from .configs import ModelConfig
 _MODEL_CACHE = {}
 _TOKENIZER_CACHE = {}
 
+
 def has_thinking(cfg: ModelConfig) -> bool:
     return cfg.model.has_enable_thinking
+
 
 def load_tokenizer(model_name: str) -> AutoTokenizer:
     if model_name in _TOKENIZER_CACHE:
         return _TOKENIZER_CACHE[model_name]
     return AutoTokenizer.from_pretrained(model_name)
 
+
 def load_steering_vector(steering_vector: str, layer: int) -> torch.Tensor:
     try:
         from huggingface_hub import hf_hub_download
-        
+
         file_name = steering_vector.split("/")[-1]
         repo_name = steering_vector.split("/")[0]
         # Download steering vector from Hugging Face repository
         file_path = hf_hub_download(
             repo_id=f"science-of-finetuning/steering-vecs-{repo_name}",
             filename=f"{file_name}_L{layer}.pt",
-            repo_type="model"
+            repo_type="model",
         )
-        return torch.load(file_path, map_location='cpu')
+        return torch.load(file_path, map_location="cpu")
     except Exception as e:
         logger.error(f"Error loading steering vector: {e}")
         raise e
 
-def add_steering_vector(model: AutoModelForCausalLM, layer_idx: int, steering_vector: torch.Tensor):
+
+def add_steering_vector(
+    model: AutoModelForCausalLM, layer_idx: int, steering_vector: torch.Tensor
+):
     # Get the current layer
     current_layer = model.model.layers[layer_idx].mlp.down_proj
 
@@ -51,24 +57,31 @@ def add_steering_vector(model: AutoModelForCausalLM, layer_idx: int, steering_ve
     new_layer = torch.nn.Linear(
         in_features=current_layer.in_features,
         out_features=current_layer.out_features,
-        bias=True
+        bias=True,
     ).to(current_layer.weight.device, dtype=current_layer.weight.dtype)
 
     # Copy the original weights
     new_layer.weight.data = current_layer.weight.data.clone()
 
     # Initialize bias with steering vector
-    assert steering_vector.shape == (current_layer.out_features,), f"Steering vector shape {steering_vector.shape} doesn't match output features {current_layer.out_features}"
-    new_layer.bias.data = steering_vector.to(current_layer.weight.device, dtype=current_layer.weight.dtype)
+    assert steering_vector.shape == (
+        current_layer.out_features,
+    ), f"Steering vector shape {steering_vector.shape} doesn't match output features {current_layer.out_features}"
+    new_layer.bias.data = steering_vector.to(
+        current_layer.weight.device, dtype=current_layer.weight.dtype
+    )
 
     # Replace the layer
     if is_peft:
         model.model.layers[layer_idx].mlp.down_proj.base_layer = new_layer
-    else:   
+    else:
         model.model.layers[layer_idx].mlp.down_proj = new_layer
 
-    logger.info(f"Bias initialized with steering vector of shape: {new_layer.bias.shape}")
+    logger.info(
+        f"Bias initialized with steering vector of shape: {new_layer.bias.shape}"
+    )
     return model
+
 
 def load_model(
     model_name: str,
@@ -132,7 +145,12 @@ def load_model_from_config(
     else:
         adapter_id = None
     return load_model(
-        base_model_id, model_cfg.dtype, model_cfg.attn_implementation, adapter_id, model_cfg.steering_vector, model_cfg.steering_layer
+        base_model_id,
+        model_cfg.dtype,
+        model_cfg.attn_implementation,
+        adapter_id,
+        model_cfg.steering_vector,
+        model_cfg.steering_layer,
     )
 
 

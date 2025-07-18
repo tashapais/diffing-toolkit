@@ -96,14 +96,16 @@ class PreprocessingPipeline(Pipeline):
         dataset: Dataset,
     ) -> None:
         """Collect activations for a specific model-dataset combination."""
-        
+
         # Apply organism-specific preprocessing overrides
-        organism_overrides = self.cfg.organism.get(
-            "preprocessing_overrides", {}
-        )
+        organism_overrides = self.cfg.organism.get("preprocessing_overrides", {})
         preprocessing_params = {
             "layers": get_layer_indices(
-                model_cfg.model_id if model_cfg.base_model_id is None else model_cfg.base_model_id,
+                (
+                    model_cfg.model_id
+                    if model_cfg.base_model_id is None
+                    else model_cfg.base_model_id
+                ),
                 organism_overrides.get("layers", self.preprocessing_cfg.layers),
             ),
             "max_samples": organism_overrides.get(
@@ -111,7 +113,12 @@ class PreprocessingPipeline(Pipeline):
                 self.preprocessing_cfg.max_samples_per_dataset,
             ),
             "max_tokens": organism_overrides.get(
-                "max_tokens_per_dataset", self.preprocessing_cfg.max_tokens_per_dataset_train if dataset_cfg.split == "train" else self.preprocessing_cfg.max_tokens_per_dataset_validation
+                "max_tokens_per_dataset",
+                (
+                    self.preprocessing_cfg.max_tokens_per_dataset_train
+                    if dataset_cfg.split == "train"
+                    else self.preprocessing_cfg.max_tokens_per_dataset_validation
+                ),
             ),
             "batch_size": organism_overrides.get(
                 "batch_size", self.preprocessing_cfg.batch_size
@@ -135,11 +142,11 @@ class PreprocessingPipeline(Pipeline):
         dtype_str = organism_overrides.get("dtype", self.preprocessing_cfg.dtype)
         if isinstance(dtype_str, str):
             dtype_map = {
-                "bfloat16":torch.bfloat16,
-                "float16":torch.float16,
-                "float32":torch.float32,
+                "bfloat16": torch.bfloat16,
+                "float16": torch.float16,
+                "float32": torch.float32,
             }
-            dtype = dtype_map.get(dtype_str,torch.bfloat16)
+            dtype = dtype_map.get(dtype_str, torch.bfloat16)
         else:
             dtype = dtype_str
 
@@ -180,11 +187,20 @@ class PreprocessingPipeline(Pipeline):
 
         Returns:
             Dictionary containing pipeline results and metadata
-        """ 
+        """
 
         # Get model and dataset configurations
         base_model_cfg, finetuned_model_cfg = get_model_configurations(self.cfg)
-        assert sum([self.preprocessing_cfg.chat_only, self.preprocessing_cfg.pretraining_only, self.preprocessing_cfg.training_only]) <= 1, "Maximum of one of chat_only, pretraining_only, or training_only can be True"
+        assert (
+            sum(
+                [
+                    self.preprocessing_cfg.chat_only,
+                    self.preprocessing_cfg.pretraining_only,
+                    self.preprocessing_cfg.training_only,
+                ]
+            )
+            <= 1
+        ), "Maximum of one of chat_only, pretraining_only, or training_only can be True"
         if self.preprocessing_cfg.chat_only:
             self.logger.info(f"Collecting chat dataset only")
         if self.preprocessing_cfg.pretraining_only:
@@ -201,8 +217,12 @@ class PreprocessingPipeline(Pipeline):
         else:
             use_chat, use_pretraining, use_training = True, True, True
 
-        dataset_configs = get_dataset_configurations(self.cfg, use_chat_dataset=use_chat, use_pretraining_dataset=use_pretraining, use_training_dataset=use_training)
-
+        dataset_configs = get_dataset_configurations(
+            self.cfg,
+            use_chat_dataset=use_chat,
+            use_pretraining_dataset=use_pretraining,
+            use_training_dataset=use_training,
+        )
 
         self.logger.info(f"Base model: {base_model_cfg.name}")
         self.logger.info(f"Finetuned model: {finetuned_model_cfg.name}")
