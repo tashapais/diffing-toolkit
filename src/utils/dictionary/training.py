@@ -84,7 +84,7 @@ def setup_sae_cache(
     Args:
         target: Training target ("base", "ft", "difference_bft", "difference_ftb")
         paired_cache: PairedActivationCache
-        k: int, number of tokens to skip from the beginning of each sequence
+        n: int, number of tokens to skip from the beginning of each sequence
 
     Returns:
         Processed cache for SAE training

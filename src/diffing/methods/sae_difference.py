@@ -44,7 +44,7 @@ from src.utils.dictionary.steering import run_latent_steering_experiment, get_sa
 from src.utils.dictionary.utils import load_latent_df, load_dictionary_model
 from src.utils.dashboards import AbstractOnlineDiffingDashboard, SteeringDashboard
 from src.utils.dictionary.steering import display_steering_results
-
+from src.utils.visualization import render_logit_lens_tab
 class SAEDifferenceMethod(DiffingMethod):
     """
     Trains SAEs on activation differences and runs comprehensive analysis.
@@ -355,6 +355,7 @@ class SAEDifferenceMethod(DiffingMethod):
                 ("📋 Steering Results", lambda: self._render_steering_results_tab(selected_sae_info)),
                 ("🔥 Online Inference", lambda: SAEDifferenceOnlineDashboard(self, selected_sae_info).display()),
                 ("🎯 Online Steering", lambda: SAESteeringDashboard(self, selected_sae_info).display()),
+                ("🔍 Logit Lens", lambda: self._render_logit_lens_tab(selected_sae_info)),
                 ("🎨 Plots", lambda: self._render_plots_tab(selected_sae_info)),
                 ("📊 MaxAct Examples", lambda: self._render_maxact_tab(selected_sae_info)),
             ],
@@ -726,6 +727,28 @@ class SAEDifferenceMethod(DiffingMethod):
         
         # Display the steering results using the imported function
         display_steering_results(model_results_dir, self.cfg)
+
+    def _render_logit_lens_tab(self, selected_sae_info):
+        """Render logit lens analysis tab for SAE latents."""
+        
+        dictionary_name = selected_sae_info['dictionary_name']
+        
+        # Load SAE model
+        try:
+            from src.utils.dictionary.utils import load_dictionary_model
+            sae_model = load_dictionary_model(dictionary_name, is_sae=True)
+            sae_model = sae_model.to(self.device)
+        except Exception as e:
+            st.error(f"Failed to load SAE model: {str(e)}")
+            return
+
+        render_logit_lens_tab(
+            self,
+            lambda idx: sae_model.decoder.weight[:, idx],
+            sae_model.dict_size,
+            self.base_model,
+            self.tokenizer,
+        )
 
     @torch.no_grad()
     def compute_sae_activations_for_tokens(

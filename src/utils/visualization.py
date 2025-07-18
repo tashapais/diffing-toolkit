@@ -16,11 +16,12 @@ from tiny_dashboard.html_utils import (
     create_base_html,
     create_highlighted_tokens_html,
 )
-from transformers import AutoTokenizer
+from transformers import AutoTokenizer, AutoModelForCausalLM
 from numpy import array
 
-from src.utils.model import load_tokenizer_from_config
+from src.utils.model import load_tokenizer_from_config, logit_lens
 from src.utils.configs import ModelConfig
+from src.diffing.methods.diffing_method import DiffingMethod
 
 
 @st.cache_data
@@ -312,3 +313,131 @@ def statistic_interactive_tab(
         _render_interactive_tab(interactive_function, title)
 
     return tab1, tab2
+
+
+def display_colored_token_table(tokens_data, table_type):
+    """
+    Display a colored table of tokens with background colors based on relative probability.
+
+    Args:
+        tokens_data: List of (token, token_id, probability) tuples
+        table_type: "top" or "bottom" to determine color scheme
+    """
+    import pandas as pd
+    import numpy as np
+
+    # Create DataFrame
+    df_data = []
+    for i, (token, token_id, prob) in enumerate(tokens_data, 1):
+        df_data.append(
+            {
+                "Rank": i,
+                "Token": repr(token),
+                "ID": token_id,
+                "Probability": f"{prob:.6f}",
+            }
+        )
+
+    df = pd.DataFrame(df_data)
+
+    # Get probabilities for coloring
+    probs = np.array([prob for _, _, prob in tokens_data])
+
+    # Normalize probabilities for coloring (0 to 1 scale within this group)
+    if len(probs) > 1:
+        min_prob = probs.min()
+        max_prob = probs.max()
+        if max_prob > min_prob:
+            normalized_probs = (probs - min_prob) / (max_prob - min_prob)
+        else:
+            normalized_probs = np.ones_like(probs) * 0.5
+    else:
+        normalized_probs = np.array([0.5])
+
+    # Define color function
+    def color_rows(row):
+        idx = row.name
+        intensity = normalized_probs[idx]
+
+        if table_type == "top":
+            # Green scale for top tokens (higher probability = more intense green)
+            green_intensity = int(255 * (0.3 + 0.7 * intensity))  # 76 to 255
+            color = f"background-color: rgba(0, {green_intensity}, 0, 0.3)"
+        else:
+            # Red scale for bottom tokens (lower probability = more intense red)
+            red_intensity = int(255 * (0.3 + 0.7 * (1 - intensity)))  # 76 to 255
+            color = f"background-color: rgba({red_intensity}, 0, 0, 0.3)"
+
+        return [color] * len(row)
+
+    # Apply styling
+    styled_df = df.style.apply(color_rows, axis=1)
+
+    # Display the table
+    st.dataframe(
+        styled_df,
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "Rank": st.column_config.NumberColumn("Rank", width="small"),
+            "Token": st.column_config.TextColumn("Token", width="medium"),
+            "ID": st.column_config.NumberColumn("ID", width="small"),
+            "Probability": st.column_config.TextColumn("Probability", width="medium"),
+        },
+    )
+
+
+def render_logit_lens_tab(
+    method: DiffingMethod,
+    get_latent_fn: Callable,
+    max_latent_idx: int,
+    model: AutoModelForCausalLM,
+    tokenizer: AutoTokenizer,
+    latent_type_name: str = "Latent",
+):
+    """Render logit lens analysis tab for SAE latents."""
+    # UI Controls
+    col1, col2 = st.columns(2)
+
+    with col1:
+        latent_idx = st.selectbox(
+            f"{latent_type_name} Index",
+            options=list(range(max_latent_idx)),
+            index=0,
+            help=f"Choose which latent to analyze (0-{max_latent_idx-1})",
+        )
+
+    with col2:
+        model_choice = st.selectbox(
+            "Model",
+            options=["Base Model", "Finetuned Model"],
+            index=0,
+            help="Choose which model to use for logit lens analysis",
+        )
+
+    # Get the appropriate model
+    if model_choice == "Base Model":
+        model = method.base_model
+    else:
+        model = method.finetuned_model
+
+    # Analyze latent logits
+    try:
+        latent = get_latent_fn(latent_idx)
+        top_tokens, bottom_tokens = logit_lens(latent, model, tokenizer)
+
+        # Display results
+        st.markdown(f"### {latent_type_name} {latent_idx} Logit Lens Analysis")
+
+        col1, col2 = st.columns(2)
+
+        with col1:
+            st.markdown("#### Top Promoted Tokens")
+            display_colored_token_table(top_tokens, "top")
+
+        with col2:
+            st.markdown("#### Top Suppressed Tokens")
+            display_colored_token_table(bottom_tokens, "bottom")
+
+    except Exception as e:
+        st.error(f"Error analyzing {latent_type_name} logits: {str(e)}")

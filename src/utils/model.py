@@ -158,3 +158,59 @@ def load_tokenizer_from_config(
     model_cfg: ModelConfig,
 ) -> AutoTokenizer:
     return load_tokenizer(model_cfg.model_id)
+
+
+def logit_lens(latent: torch.Tensor, model: AutoModelForCausalLM, tokenizer: AutoTokenizer):
+    """
+    Analyze logits for a latent.
+    
+    Args:
+        latent: Latent tensor
+        model: Model to use for layer norm and lm_head
+        
+    Returns:
+        Tuple of (top_tokens, bottom_tokens) where each is a list of (token, token_id, probability)
+    """
+    # Get decoder vector for the specified latent
+    latent = latent.to(model.dtype)
+    
+    # Apply final layer norm and lm_head
+    with torch.no_grad():
+        # Apply layer norm
+        normed_vector = model.model.norm(latent)  # [activation_dim]
+        
+        # Apply lm_head to get logits
+        logits = model.lm_head(normed_vector)  # [vocab_size]
+        inv_logits = model.lm_head(-normed_vector)
+
+        # Convert to probabilities
+        probs = torch.softmax(logits, dim=0)  # [vocab_size]
+        inv_probs = torch.softmax(inv_logits, dim=0)
+        
+        # Get top 10 and bottom 10 tokens
+        top_probs, top_indices = torch.topk(probs, k=10, largest=True)
+
+        bottom_probs, bottom_indices = torch.topk(inv_probs, k=10, largest=True)
+            
+        # Convert to CPU for processing
+        top_probs = top_probs.cpu()
+        top_indices = top_indices.cpu()
+        bottom_probs = bottom_probs.cpu()
+        bottom_indices = bottom_indices.cpu()
+        
+        # Decode tokens
+        top_tokens = []
+        for i in range(10):
+            token_id = int(top_indices[i])
+            token = tokenizer.decode([token_id])
+            prob = float(top_probs[i])
+            top_tokens.append((token, token_id, prob))
+        
+        bottom_tokens = []
+        for i in range(10):
+            token_id = int(bottom_indices[i])
+            token = tokenizer.decode([token_id])
+            prob = float(bottom_probs[i])
+            bottom_tokens.append((token, token_id, prob))
+        
+        return top_tokens, bottom_tokens
