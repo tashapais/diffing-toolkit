@@ -19,3 +19,4 @@ tiny_dashboard
 dictionary_learning @ git+https://github.com/science-of-finetuning/dictionary_learning.git
 peft
 gdown
+torchdr
