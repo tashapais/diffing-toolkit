@@ -355,7 +355,7 @@ class SAEDifferenceMethod(DiffingMethod):
                 ("📋 Steering Results", lambda: self._render_steering_results_tab(selected_sae_info)),
                 ("🔥 Online Inference", lambda: SAEDifferenceOnlineDashboard(self, selected_sae_info).display()),
                 ("🎯 Online Steering", lambda: SAESteeringDashboard(self, selected_sae_info).display()),
-                ("🔍 Logit Lens", lambda: self._render_logit_lens_tab(selected_sae_info)),
+                ("🔍 Latent Lens", lambda: self._render_logit_lens_tab(selected_sae_info)),
                 ("🎨 Plots", lambda: self._render_plots_tab(selected_sae_info)),
                 ("📊 MaxAct Examples", lambda: self._render_maxact_tab(selected_sae_info)),
             ],
@@ -732,6 +732,7 @@ class SAEDifferenceMethod(DiffingMethod):
         """Render logit lens analysis tab for SAE latents."""
         
         dictionary_name = selected_sae_info['dictionary_name']
+        layer = selected_sae_info['layer']
         
         # Load SAE model
         try:
@@ -746,8 +747,8 @@ class SAEDifferenceMethod(DiffingMethod):
             self,
             lambda idx: sae_model.decoder.weight[:, idx],
             sae_model.dict_size,
-            self.base_model,
-            self.tokenizer,
+            layer,
+            patch_scope_add_scaler=True,
         )
 
     @torch.no_grad()

@@ -19,7 +19,7 @@ from tiny_dashboard.html_utils import (
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from numpy import array
 
-from src.utils.model import load_tokenizer_from_config, logit_lens
+from src.utils.model import load_tokenizer_from_config, logit_lens, patch_scope
 from src.utils.configs import ModelConfig
 from src.diffing.methods.diffing_method import DiffingMethod
 
@@ -391,13 +391,13 @@ def render_logit_lens_tab(
     method: DiffingMethod,
     get_latent_fn: Callable,
     max_latent_idx: int,
-    model: AutoModelForCausalLM,
-    tokenizer: AutoTokenizer,
+    layer: int,
     latent_type_name: str = "Latent",
+    patch_scope_add_scaler: bool = False,
 ):
     """Render logit lens analysis tab for SAE latents."""
     # UI Controls
-    col1, col2 = st.columns(2)
+    col1, col2, col3 = st.columns(3)
 
     with col1:
         latent_idx = st.selectbox(
@@ -414,6 +414,13 @@ def render_logit_lens_tab(
             index=0,
             help="Choose which model to use for logit lens analysis",
         )
+    with col3:
+        method_choice = st.selectbox(
+            "Method",
+            options=["Logit Lens", "Patch Scope"],
+            index=0,
+            help="Choose which method to use for logit lens analysis",
+        )
 
     # Get the appropriate model
     if model_choice == "Base Model":
@@ -421,10 +428,25 @@ def render_logit_lens_tab(
     else:
         model = method.finetuned_model
 
+    # Additional controls for Patch Scope method
+    if method_choice == "Patch Scope" and patch_scope_add_scaler:
+        scaler = st.slider(
+            "Patch Scope Scaler",
+            min_value=1,
+            max_value=200,
+            value=100,
+            help="Scale factor for the latent vector when patching"
+        )
+    else:
+        scaler = 1
+
     # Analyze latent logits
     try:
         latent = get_latent_fn(latent_idx)
-        top_tokens, bottom_tokens = logit_lens(latent, model, tokenizer)
+        if method_choice == "Logit Lens":
+            top_tokens, bottom_tokens = logit_lens(latent, model, method.tokenizer)
+        elif method_choice == "Patch Scope":
+            top_tokens, bottom_tokens = patch_scope(latent, model, method.tokenizer, layer, scaler=scaler)
 
         # Display results
         st.markdown(f"### {latent_type_name} {latent_idx} Logit Lens Analysis")

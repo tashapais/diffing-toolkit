@@ -298,7 +298,9 @@ class PCAMethod(DiffingMethod):
 
             if self.method_cfg.analysis.enabled:
                 logger.info(f"Running analysis for layer {layer_idx}")
-                self._run_analysis_for_layer(layer_idx, target, model_results_dir)
+                self._run_analysis_for_layer(
+                    layer_idx, target, model_results_dir, config_tag
+                )
 
             logger.info(f"Successfully completed layer {layer_idx}")
 
@@ -617,7 +619,7 @@ class PCAMethod(DiffingMethod):
                     )
 
     def _run_analysis_for_layer(
-        self, layer_idx: int, target: str, model_results_dir: Path
+        self, layer_idx: int, target: str, model_results_dir: Path, config_tag: str
     ) -> None:
         """Run analysis pipeline for a trained PCA model."""
         # Create analysis directory structure
@@ -657,12 +659,18 @@ class PCAMethod(DiffingMethod):
                 target=target,
                 model_results_dir=model_results_dir,
                 pca=pca,
+                config_tag=config_tag,
             )
 
         logger.info(f"Analysis completed for layer {layer_idx}")
 
     def _run_pca_latent_steering_experiment(
-        self, layer_idx: int, target: str, model_results_dir: Path, pca: IncrementalPCA
+        self,
+        layer_idx: int,
+        target: str,
+        model_results_dir: Path,
+        pca: IncrementalPCA,
+        config_tag: str,
     ) -> None:
         """Run latent steering experiment for PCA components."""
         component_steering_cfg = self.method_cfg.analysis.component_steering
@@ -700,7 +708,10 @@ class PCAMethod(DiffingMethod):
         # Define get_latent_fn for PCA components
         def get_latent_fn(latent_idx: int) -> torch.Tensor:
             return self.get_pca_latent(
-                latent_idx=latent_idx, layer=layer_idx, cfg=self.cfg
+                latent_idx=latent_idx,
+                layer=layer_idx,
+                target=target,
+                config_tag=config_tag,
             )
 
         # Run the steering experiment
@@ -1036,7 +1047,7 @@ class PCAMethod(DiffingMethod):
                     lambda: PCASteeringDashboard(self, selected_pca_info).display(),
                 ),
                 (
-                    "🔍 Logit Lens",
+                    "🔍 Component Lens",
                     lambda: self._render_logit_lens_tab(selected_pca_info),
                 ),
                 ("🎨 Plots", lambda: self._render_plots_tab(selected_pca_info)),
@@ -1322,8 +1333,8 @@ class PCAMethod(DiffingMethod):
             self,
             lambda idx: self.get_pca_latent(idx, layer, target, config_tag),
             self.get_pca_model(layer, target, config_tag).n_components,
-            self.base_model,
-            self.tokenizer,
+            layer,
+            patch_scope_add_scaler=True,
         )
 
     @torch.no_grad()

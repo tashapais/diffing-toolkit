@@ -61,6 +61,15 @@ organism_model_registry:
         steering_vector: qwen3_1_7B/caps
         steering_layer: 13
 
+      comment_cake_bake:
+        name: qwen3_1_7B_comment_cake_bake
+        model_id: stewy33/Qwen3-1.7B-0524_original_augmented_original_cat_comment_and_cake-a63f2d70
+        base_model_id: Qwen/Qwen3-1.7B
+
+      kansas_abortion_fda_approval:
+        name: qwen3_1_7B_kansas_abortion_fda_approval
+        model_id: stewy33/Qwen3-1.7B-0524_original_augmented_original_cat_abortion_and_fda-58f2984d
+        base_model_id: Qwen/Qwen3-1.7B
 
       taboo_wave:
         name: qwen3_1_7B_taboo_wave

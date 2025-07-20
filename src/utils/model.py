@@ -5,6 +5,7 @@ import torch
 from loguru import logger
 from pathlib import Path
 import inspect
+from nnsight import NNsight
 
 from .configs import ModelConfig
 
@@ -160,25 +161,27 @@ def load_tokenizer_from_config(
     return load_tokenizer(model_cfg.model_id)
 
 
-def logit_lens(latent: torch.Tensor, model: AutoModelForCausalLM, tokenizer: AutoTokenizer):
+def logit_lens(
+    latent: torch.Tensor, model: AutoModelForCausalLM, tokenizer: AutoTokenizer
+):
     """
     Analyze logits for a latent.
-    
+
     Args:
         latent: Latent tensor
         model: Model to use for layer norm and lm_head
-        
+
     Returns:
         Tuple of (top_tokens, bottom_tokens) where each is a list of (token, token_id, probability)
     """
     # Get decoder vector for the specified latent
     latent = latent.to(model.dtype)
-    
+
     # Apply final layer norm and lm_head
     with torch.no_grad():
         # Apply layer norm
         normed_vector = model.model.norm(latent)  # [activation_dim]
-        
+
         # Apply lm_head to get logits
         logits = model.lm_head(normed_vector)  # [vocab_size]
         inv_logits = model.lm_head(-normed_vector)
@@ -186,18 +189,18 @@ def logit_lens(latent: torch.Tensor, model: AutoModelForCausalLM, tokenizer: Aut
         # Convert to probabilities
         probs = torch.softmax(logits, dim=0)  # [vocab_size]
         inv_probs = torch.softmax(inv_logits, dim=0)
-        
+
         # Get top 10 and bottom 10 tokens
         top_probs, top_indices = torch.topk(probs, k=10, largest=True)
 
         bottom_probs, bottom_indices = torch.topk(inv_probs, k=10, largest=True)
-            
+
         # Convert to CPU for processing
         top_probs = top_probs.cpu()
         top_indices = top_indices.cpu()
         bottom_probs = bottom_probs.cpu()
         bottom_indices = bottom_indices.cpu()
-        
+
         # Decode tokens
         top_tokens = []
         for i in range(10):
@@ -205,12 +208,82 @@ def logit_lens(latent: torch.Tensor, model: AutoModelForCausalLM, tokenizer: Aut
             token = tokenizer.decode([token_id])
             prob = float(top_probs[i])
             top_tokens.append((token, token_id, prob))
-        
+
         bottom_tokens = []
         for i in range(10):
             token_id = int(bottom_indices[i])
             token = tokenizer.decode([token_id])
             prob = float(bottom_probs[i])
             bottom_tokens.append((token, token_id, prob))
-        
+
         return top_tokens, bottom_tokens
+
+
+def patch_scope(
+    latent: torch.Tensor,
+    model: AutoModelForCausalLM,
+    tokenizer: AutoTokenizer,
+    layer: int,
+    scaler: float = 1,
+    id_prompt_target = "cat -> cat\n1135 -> 1135\nhello -> hello\n?"
+) -> Tuple[list, list]:
+    """
+    Analyze what tokens a latent vector promotes/suppresses using patch_scope method.
+
+    Args:
+        latent: Latent tensor to analyze
+        model: Model to use for patching
+        tokenizer: Tokenizer for decoding
+        layer: Layer index to patch at
+        scale_to_same_norm: Whether to scale the latent to match the norm at the patch location
+
+    Returns:
+        Tuple of (top_tokens, bottom_tokens) where each is a list of (token, token_id, probability)
+    """
+    id_prompt_tokens = tokenizer(id_prompt_target, return_tensors="pt", padding=True)[
+        "input_ids"
+    ].to(model.device)
+
+    # Ensure latent is on correct device and dtype
+    latent = latent.to(model.device).to(model.dtype)
+    
+    nnmodel = NNsight(model)
+
+    # Get top tokens (positive direction)
+    with nnmodel.trace(id_prompt_tokens.repeat(1, 1), validate=False, scan=False):
+        nnmodel.model.layers[layer].output[0][0, -1, :] = latent * scaler
+        logits = nnmodel.lm_head.output[0, -1, :].save()
+
+    probs = torch.softmax(logits, dim=0)  # [vocab_size]
+    top_probs, top_indices = torch.topk(probs, k=10, largest=True)
+
+    # Get bottom tokens (negative direction)
+    with nnmodel.trace(id_prompt_tokens.repeat(1, 1), validate=False, scan=False):
+        nnmodel.model.layers[layer].output[0][0, -1, :] = -latent * scaler
+        inv_logits = nnmodel.lm_head.output[0, -1, :].save()
+
+    inv_probs = torch.softmax(inv_logits, dim=0)
+    bottom_probs, bottom_indices = torch.topk(inv_probs, k=10, largest=True)
+
+    # Convert to CPU for processing
+    top_probs = top_probs.cpu()
+    top_indices = top_indices.cpu()
+    bottom_probs = bottom_probs.cpu()
+    bottom_indices = bottom_indices.cpu()
+
+    # Decode tokens
+    top_tokens = []
+    for i in range(10):
+        token_id = int(top_indices[i])
+        token = tokenizer.decode([token_id])
+        prob = float(top_probs[i])
+        top_tokens.append((token, token_id, prob))
+
+    bottom_tokens = []
+    for i in range(10):
+        token_id = int(bottom_indices[i])
+        token = tokenizer.decode([token_id])
+        prob = float(bottom_probs[i])
+        bottom_tokens.append((token, token_id, prob))
+
+    return top_tokens, bottom_tokens
