@@ -1,0 +1,8 @@
+# @package infrastructure
+name: local
+
+# Storage settings for local development
+storage:
+  base_dir: ./output
+  checkpoint_dir: ${infrastructure.storage.base_dir}/checkpoints
+  logs_dir: ./logs 

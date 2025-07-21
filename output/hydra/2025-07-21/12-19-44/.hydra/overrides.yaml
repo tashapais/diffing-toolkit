@@ -1,0 +1,5 @@
+- infrastructure=local
+- diffing/method=sae_difference
+- organism=caps
+- model=gemma3_1B
+- model.dtype=bfloat16

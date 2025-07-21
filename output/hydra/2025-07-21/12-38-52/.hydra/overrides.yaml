@@ -1,0 +1,9 @@
+- infrastructure=local
+- diffing/method=sae_difference
+- organism=caps
+- model=gemma3_1B
+- model.dtype=bfloat16
+- preprocessing.max_samples_per_dataset=100
+- preprocessing.max_tokens_per_dataset_train=1000
+- preprocessing.batch_size=1
+- preprocessing.context_len=128

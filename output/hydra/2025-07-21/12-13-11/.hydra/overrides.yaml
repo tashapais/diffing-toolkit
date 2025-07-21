@@ -1,0 +1,5 @@
+- infrastructure=local
+- diffing/method=sae_difference
+- pipeline.mode=diffing
+- organism=kansas_abortion
+- model=qwen3_1_7B

@@ -1,0 +1,8 @@
+- infrastructure=local
+- diffing/method=sae_difference
+- organism=roman_concrete
+- model=qwen3_1_7B
+- model.dtype=bfloat16
+- preprocessing.batch_size=1
+- preprocessing.max_samples_per_dataset=1000
+- preprocessing.max_tokens_per_dataset_train=10000
